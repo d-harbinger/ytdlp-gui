@@ -120,18 +120,12 @@ class GUILogger:
 # ── Main Application ─────────────────────────────────────────────────────────
 class YtDlpGUI(ctk.CTk):
     def __init__(self):
-        super().__init__()
+        super().__init__(className="ytdlp-gui")
 
         # ── Window setup ──
         self.title(APP_NAME)
         self.minsize(WINDOW_MIN_W, WINDOW_MIN_H)
         self.geometry(f"{WINDOW_MIN_W}x{WINDOW_MIN_H}")
-
-        # WM_CLASS for proper desktop integration (panel recognition)
-        try:
-            self.wm_attributes("-class", "ytdlp-gui")
-        except Exception:
-            pass
 
         # ── State ──
         self._download_thread = None
