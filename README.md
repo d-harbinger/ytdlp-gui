@@ -46,4 +46,4 @@ venv/bin/python ytdlp_gui.py
 
 ## License
 
-MIT
+MIT# ytdlp-gui
