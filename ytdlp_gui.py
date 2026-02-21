@@ -14,6 +14,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog
 from datetime import timedelta
+import urllib.parse
 
 import customtkinter as ctk
 
@@ -24,32 +25,91 @@ except ImportError:
     sys.exit(1)
 
 
-# ── HiDPI Auto-Scaling (mirrors transcript extractor pattern) ────────────────
 # ── HiDPI Auto-Scaling ────────────────────────────────────────────────────────
 # DPI-based detection first; resolution fallback for Linux native 1x scaling
-_dpi_root = tk.Tk()
-_dpi_root.withdraw()
-_dpi = _dpi_root.winfo_fpixels("1i")
-_dpi_scale = _dpi / 96.0
+try:
+    _dpi_root = tk.Tk()
+    _dpi_root.withdraw()
+    _dpi = _dpi_root.winfo_fpixels("1i")
+    _dpi_scale = _dpi / 96.0
 
-# Linux at native 1x reports 96 DPI even on 5K — use resolution fallback
-if _dpi_scale < 1.25:
-    _longest = max(_dpi_root.winfo_screenwidth(), _dpi_root.winfo_screenheight())
-    if _longest >= 5120:
-        _dpi_scale = 2.5
-    elif _longest >= 3840:
-        _dpi_scale = 2.0
-    elif _longest >= 2560:
-        _dpi_scale = 1.5
+    # Linux at native 1x reports 96 DPI even on 5K — use resolution fallback
+    if _dpi_scale < 1.25:
+        _longest = max(_dpi_root.winfo_screenwidth(), _dpi_root.winfo_screenheight())
+        if _longest >= 5120:
+            _dpi_scale = 2.5
+        elif _longest >= 3840:
+            _dpi_scale = 2.0
+        elif _longest >= 2560:
+            _dpi_scale = 1.5
 
-_dpi_root.destroy()
+    _dpi_root.destroy()
+except tk.TclError:                          # F-07: headless/CI resilience
+    _dpi_scale = 1.0
+
 ctk.set_widget_scaling(_dpi_scale)
 ctk.set_window_scaling(_dpi_scale)
 
 
+# ── URL Validation ────────────────────────────────────────────────────────────
+# F-02: Restrict URL schemes; optionally restrict to YouTube hosts only.
+# Set YTDLP_GUI_YOUTUBE_ONLY=1 env var to lock to YouTube domains.
+ALLOWED_SCHEMES = ("http", "https")
+YOUTUBE_HOSTS = frozenset({
+    "youtube.com", "www.youtube.com", "youtu.be",
+    "m.youtube.com", "music.youtube.com",
+    "www.youtube-nocookie.com",
+})
+YOUTUBE_ONLY = os.environ.get("YTDLP_GUI_YOUTUBE_ONLY", "0") == "1"
+
+
+def _validate_url(url: str) -> tuple[bool, str]:
+    """Validate a URL for safe use with yt-dlp.
+
+    Returns (is_valid, error_message).
+    Blocks file://, data://, and other dangerous schemes unconditionally.
+    When YOUTUBE_ONLY mode is active, restricts to YouTube domains.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False, "Could not parse URL."
+
+    if parsed.scheme not in ALLOWED_SCHEMES:
+        return False, f"Blocked scheme '{parsed.scheme}://'. Only http/https allowed."
+
+    if not parsed.hostname:
+        return False, "URL has no hostname."
+
+    if YOUTUBE_ONLY:
+        # Strip leading dots, compare lowercase
+        host = parsed.hostname.lower().lstrip(".")
+        if host not in YOUTUBE_HOSTS:
+            return False, (
+                f"Host '{host}' not in allowed YouTube domains. "
+                "Unset YTDLP_GUI_YOUTUBE_ONLY to allow all sites."
+            )
+
+    return True, ""
+
+
+# ── Input Validation Helpers ──────────────────────────────────────────────────
+# F-04: Playlist range must be digits, commas, hyphens, colons, spaces only.
+_PLAYLIST_RANGE_RE = re.compile(r'^[\d,\-:\s]+$')
+
+
+def _validate_playlist_range(rng: str) -> bool:
+    """Return True if the playlist range string is safe for yt-dlp."""
+    return bool(_PLAYLIST_RANGE_RE.fullmatch(rng))
+
+
 # ── Native Directory Picker ───────────────────────────────────────────────────
 def _native_askdirectory(title="Select Directory"):
-    """Use zenity/kdialog for native file picker, fallback to tkinter."""
+    """Use zenity/kdialog for native file picker, fallback to tkinter.
+
+    SECURITY: `title` must remain a hardcoded string literal at all call sites.
+    Never pass user-controlled input as the title parameter. (CWE-78)
+    """
     if shutil.which("zenity"):
         try:
             result = subprocess.run(
@@ -78,9 +138,11 @@ def _native_askdirectory(title="Select Directory"):
 
 # ── Application Constants ────────────────────────────────────────────────────
 APP_NAME = "yt-dlp GUI"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 WINDOW_MIN_W = 700
 WINDOW_MIN_H = 580
+
+MAX_PLAYLIST_DOWNLOADS = 500      # F-05: resource exhaustion guard
 
 AUDIO_CODECS = ["mp3", "opus", "m4a", "flac", "wav", "vorbis"]
 AUDIO_QUALITIES = ["320", "256", "192", "128", "96"]
@@ -102,7 +164,6 @@ class GUILogger:
         self.callback = callback
 
     def debug(self, msg):
-        # Filter out overly verbose debug lines
         if msg.startswith("[debug]"):
             return
         self.callback(msg)
@@ -130,11 +191,14 @@ class YtDlpGUI(ctk.CTk):
         # ── State ──
         self._download_thread = None
         self._cancel_flag = threading.Event()
-        self._fetched_formats = []  # populated by Fetch Info
+        self._fetched_formats = []
         self._video_info = None
 
         # ── Build UI ──
         self._build_ui()
+
+        # ── Graceful shutdown (F-06) ──
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # ── Icon ──
         icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
@@ -143,6 +207,17 @@ class YtDlpGUI(ctk.CTk):
                 self.iconphoto(True, tk.PhotoImage(file=icon_path))
             except Exception:
                 pass
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Graceful Shutdown  (F-06)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _on_close(self):
+        """Signal cancellation and wait briefly for download thread cleanup."""
+        self._cancel_flag.set()
+        if self._download_thread and self._download_thread.is_alive():
+            self._download_thread.join(timeout=3)
+        self.destroy()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # UI Construction
@@ -204,7 +279,6 @@ class YtDlpGUI(ctk.CTk):
         self.opts_frame.grid_columnconfigure(1, weight=1)
         row += 1
 
-        # Video options (default)
         self._build_video_opts()
 
         # ── Output Directory ──
@@ -264,11 +338,9 @@ class YtDlpGUI(ctk.CTk):
             row=0, column=0, padx=12, pady=8, sticky="w"
         )
 
-        # Preset dropdown
         self.video_format_var = ctk.StringVar(value=VIDEO_PRESET_FORMATS[0][0])
         labels = [f[0] for f in VIDEO_PRESET_FORMATS]
 
-        # If we have fetched formats, append them
         if self._fetched_formats:
             for f in self._fetched_formats:
                 label = self._format_label(f)
@@ -307,7 +379,6 @@ class YtDlpGUI(ctk.CTk):
         self.format_menu = ctk.CTkOptionMenu(self.opts_frame, variable=self.video_format_var, values=labels)
         self.format_menu.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
 
-        # Playlist range
         ctk.CTkLabel(self.opts_frame, text="Items:").grid(
             row=0, column=2, padx=(24, 8), pady=8, sticky="w"
         )
@@ -331,6 +402,13 @@ class YtDlpGUI(ctk.CTk):
         url = self.url_entry.get().strip()
         if not url:
             self._set_status("Please enter a URL.", color="orange")
+            return
+
+        # ── F-02: URL validation ──
+        valid, err = _validate_url(url)
+        if not valid:
+            self._set_status(err, color="red")
+            self._log_append(f"Blocked URL: {err}")
             return
 
         self.fetch_btn.configure(state="disabled", text="Fetching…")
@@ -367,12 +445,11 @@ class YtDlpGUI(ctk.CTk):
                     self.info_label.configure(text=display, text_color=("white", "white"))
                     self._set_status("Info fetched.", color="green")
                     self.fetch_btn.configure(state="normal", text="Fetch Info")
-                    # Auto-switch to playlist mode if detected
                     if is_playlist:
                         self.mode_var.set("playlist")
                         self._build_playlist_opts()
                     else:
-                        self._on_mode_change()  # rebuild to include fetched formats
+                        self._on_mode_change()
 
                 self.after(0, _update_ui)
 
@@ -414,6 +491,7 @@ class YtDlpGUI(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _browse_dir(self):
+        # SECURITY: title is hardcoded — never pass user input (CWE-78)
         path = _native_askdirectory(title="Select Download Directory")
         if path:
             self.dir_entry.delete(0, "end")
@@ -428,17 +506,15 @@ class YtDlpGUI(ctk.CTk):
 
         selected = self.video_format_var.get()
 
-        # Check presets first
         for label, fmt in VIDEO_PRESET_FORMATS:
             if selected == label:
                 return fmt
 
-        # If it's a fetched format, extract the format_id from [xxx]
         match = re.match(r"\[(\S+)\]", selected)
         if match:
             return match.group(1)
 
-        return "bv*+ba/b"  # safe fallback
+        return "bv*+ba/b"
 
     def _build_ydl_opts(self, output_dir):
         """Construct the yt-dlp options dict based on current UI state."""
@@ -455,6 +531,8 @@ class YtDlpGUI(ctk.CTk):
             "quiet": True,
             "no_warnings": False,
             "merge_output_format": "mp4",
+            "restrictfilenames": True,          # F-03: path traversal mitigation
+            "max_downloads": MAX_PLAYLIST_DOWNLOADS,  # F-05: resource exhaustion guard
         }
 
         if mode == "audio":
@@ -464,17 +542,22 @@ class YtDlpGUI(ctk.CTk):
                 "preferredcodec": self.audio_codec_var.get(),
                 "preferredquality": self.audio_quality_var.get(),
             }]
-            # Don't force mp4 merge for audio
             del opts["merge_output_format"]
 
         if mode == "playlist":
             opts["outtmpl"]["default"] = "%(playlist_title)s/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s"
             opts["noplaylist"] = False
-            # Handle playlist range
+            # F-04: validate playlist range input
             if hasattr(self, "playlist_range_entry"):
                 rng = self.playlist_range_entry.get().strip()
                 if rng:
-                    opts["playlist_items"] = rng
+                    if _validate_playlist_range(rng):
+                        opts["playlist_items"] = rng
+                    else:
+                        # Surface error to user; fall back to downloading all
+                        self.after(0, lambda: self._log_append(
+                            "⚠ Invalid playlist range (use digits, commas, hyphens). Downloading all items."
+                        ))
 
         return opts
 
@@ -484,9 +567,17 @@ class YtDlpGUI(ctk.CTk):
             self._set_status("Please enter a URL.", color="orange")
             return
 
+        # ── F-02: URL validation ──
+        valid, err = _validate_url(url)
+        if not valid:
+            self._set_status(err, color="red")
+            self._log_append(f"Blocked URL: {err}")
+            return
+
         # Always prompt for output directory
         output_dir = self.dir_entry.get().strip()
         if not output_dir:
+            # SECURITY: title is hardcoded — never pass user input (CWE-78)
             output_dir = _native_askdirectory(title="Select Download Directory")
             if not output_dir:
                 return
@@ -521,6 +612,11 @@ class YtDlpGUI(ctk.CTk):
                     self.after(0, lambda: self._set_status("✔ Download complete!", color="green"))
                     self.after(0, lambda: self.progress_bar.set(1.0))
 
+            except yt_dlp.utils.MaxDownloadsReached:
+                self.after(0, lambda: self._set_status(
+                    f"✔ Reached download limit ({MAX_PLAYLIST_DOWNLOADS}). Done.", color="green"
+                ))
+                self.after(0, lambda: self.progress_bar.set(1.0))
             except yt_dlp.utils.DownloadError as e:
                 if self._cancel_flag.is_set():
                     self.after(0, lambda: self._set_status("Download cancelled.", color="orange"))
