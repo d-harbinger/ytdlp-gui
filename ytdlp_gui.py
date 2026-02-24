@@ -27,26 +27,54 @@ except ImportError:
 
 
 # ── HiDPI Auto-Scaling ────────────────────────────────────────────────────────
-try:
-    _dpi_root = tk.Tk()
-    _dpi_root.withdraw()
-    _dpi = _dpi_root.winfo_fpixels("1i")
-    _dpi_scale = _dpi / 96.0
-    if _dpi_scale < 1.25:
-        _longest = max(_dpi_root.winfo_screenwidth(), _dpi_root.winfo_screenheight())
-        if _longest >= 5120:
-            _dpi_scale = 2.5
-        elif _longest >= 3840:
-            _dpi_scale = 2.0
-        elif _longest >= 2560:
-            _dpi_scale = 1.5
-    _dpi_root.destroy()
-except tk.TclError:
-    _dpi_scale = 1.0
+def _detect_scale():
+    # 1. User override — always wins
+    env = os.environ.get("YTDLP_GUI_SCALE")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
 
+    # 2. xrandr physical DPI — the only reliable method on X11
+    try:
+        out = subprocess.run(
+            ["xrandr"], capture_output=True, text=True, timeout=5
+        ).stdout
+        for line in out.splitlines():
+            if " connected" in line and "mm" in line:
+                # Parse: "DP-1 connected 5120x2880+0+0 ... 597mm x 336mm"
+                res_match = re.search(r'(\d+)x(\d+)\+', line)
+                mm_match = re.search(r'(\d+)mm x (\d+)mm', line)
+                if res_match and mm_match:
+                    px_w = int(res_match.group(1))
+                    mm_w = int(mm_match.group(1))
+                    if mm_w > 0:
+                        real_dpi = px_w / (mm_w / 25.4)
+                        scale = real_dpi / 96.0
+                        # Snap to nearest 0.25
+                        return max(1.0, round(scale * 4) / 4)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+
+    # 3. Tkinter DPI (works when DE reports correctly)
+    try:
+        r = tk.Tk()
+        r.withdraw()
+        dpi = r.winfo_fpixels("1i")
+        r.destroy()
+        scale = dpi / 96.0
+        if scale >= 1.25:
+            return round(scale * 4) / 4
+    except (tk.TclError, ValueError):
+        pass
+
+    return 1.0
+
+
+_dpi_scale = _detect_scale()
 ctk.set_widget_scaling(_dpi_scale)
 ctk.set_window_scaling(_dpi_scale)
-
 
 # ── URL Validation ────────────────────────────────────────────────────────────
 ALLOWED_SCHEMES = ("http", "https")
