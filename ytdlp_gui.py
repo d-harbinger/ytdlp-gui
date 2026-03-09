@@ -26,9 +26,42 @@ except ImportError:
     sys.exit(1)
 
 
+# ── Persistent Config ─────────────────────────────────────────────────────────
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "ytdlp-gui")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.conf")
+
+
+def _read_config() -> dict:
+    conf = {}
+    if os.path.isfile(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        conf[k.strip()] = v.strip()
+        except OSError:
+            pass
+    return conf
+
+
+def _write_config(conf: dict):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            for k, v in sorted(conf.items()):
+                f.write(f"{k}={v}\n")
+    except OSError:
+        pass
+
+
+SCALE_OPTIONS = ["Auto", "1.0", "1.25", "1.5", "1.75", "2.0", "2.25", "2.5"]
+
+
 # ── HiDPI Auto-Scaling ────────────────────────────────────────────────────────
 def _detect_scale():
-    # 1. User override — always wins
+    # 1. Env var override — always wins
     env = os.environ.get("YTDLP_GUI_SCALE")
     if env:
         try:
@@ -36,14 +69,22 @@ def _detect_scale():
         except ValueError:
             pass
 
-    # 2. xrandr physical DPI — the only reliable method on X11
+    # 2. Saved config preference (skip if "Auto")
+    conf = _read_config()
+    saved = conf.get("scale", "Auto")
+    if saved != "Auto":
+        try:
+            return float(saved)
+        except ValueError:
+            pass
+
+    # 3. xrandr physical DPI — the only reliable method on X11
     try:
         out = subprocess.run(
             ["xrandr"], capture_output=True, text=True, timeout=5
         ).stdout
         for line in out.splitlines():
             if " connected" in line and "mm" in line:
-                # Parse: "DP-1 connected 5120x2880+0+0 ... 597mm x 336mm"
                 res_match = re.search(r'(\d+)x(\d+)\+', line)
                 mm_match = re.search(r'(\d+)mm x (\d+)mm', line)
                 if res_match and mm_match:
@@ -52,12 +93,11 @@ def _detect_scale():
                     if mm_w > 0:
                         real_dpi = px_w / (mm_w / 25.4)
                         scale = real_dpi / 96.0
-                        # Snap to nearest 0.25
                         return max(1.0, round(scale * 4) / 4)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         pass
 
-    # 3. Tkinter DPI (works when DE reports correctly)
+    # 4. Tkinter DPI (works when DE reports correctly)
     try:
         r = tk.Tk()
         r.withdraw()
@@ -75,6 +115,7 @@ def _detect_scale():
 _dpi_scale = _detect_scale()
 ctk.set_widget_scaling(_dpi_scale)
 ctk.set_window_scaling(_dpi_scale)
+
 
 # ── URL Validation ────────────────────────────────────────────────────────────
 ALLOWED_SCHEMES = ("http", "https")
@@ -143,7 +184,7 @@ def _native_askdirectory(title="Select Directory"):
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 APP_NAME = "yt-dlp GUI"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 WINDOW_MIN_W = 740
 WINDOW_MIN_H = 700
 
@@ -206,6 +247,7 @@ class YtDlpGUI(ctk.CTk):
         self._video_info = None
 
         self._build_ui()
+        self._bind_x11_scroll()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
@@ -220,6 +262,23 @@ class YtDlpGUI(ctk.CTk):
         if self._download_thread and self._download_thread.is_alive():
             self._download_thread.join(timeout=3)
         self.destroy()
+
+    # ── FIX: Linux/X11 mouse wheel scrolling ─────────────────────────────────
+    # X11 fires <Button-4> (up) / <Button-5> (down) instead of <MouseWheel>.
+    # CTkScrollableFrame only binds <MouseWheel>, so scrolling is dead on Linux.
+    # bind_all catches events from any child widget inside the scroll area.
+    def _bind_x11_scroll(self):
+        canvas = self._scroll._parent_canvas
+        self.bind_all(
+            "<Button-4>",
+            lambda e: canvas.yview_scroll(-3, "units"),
+            add="+"
+        )
+        self.bind_all(
+            "<Button-5>",
+            lambda e: canvas.yview_scroll(3, "units"),
+            add="+"
+        )
 
     # ═══════════════════════════════════════════════════════════════════════════
     # UI Construction
@@ -237,24 +296,58 @@ class YtDlpGUI(ctk.CTk):
         p = self._scroll  # parent shorthand
         row = 0
 
-        # ── Header ──
-        hdr = ctk.CTkLabel(p, text=APP_NAME, font=ctk.CTkFont(size=20, weight="bold"))
-        hdr.grid(row=row, column=0, padx=16, pady=(16, 4), sticky="w")
-        row += 1
-        ctk.CTkLabel(p, text=f"v{APP_VERSION}", text_color="gray").grid(
-            row=row, column=0, padx=16, pady=(0, 12), sticky="w"
+        # ── Header with scale control ──
+        hdr_f = ctk.CTkFrame(p, fg_color="transparent")
+        hdr_f.grid(row=row, column=0, padx=16, pady=(16, 4), sticky="ew")
+        hdr_f.grid_columnconfigure(0, weight=1)
+
+        title_f = ctk.CTkFrame(hdr_f, fg_color="transparent")
+        title_f.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(title_f, text=APP_NAME, font=ctk.CTkFont(size=20, weight="bold")).grid(
+            row=0, column=0, sticky="w"
         )
+        ctk.CTkLabel(title_f, text=f"v{APP_VERSION}", text_color="gray").grid(
+            row=0, column=1, padx=(8, 0), sticky="w"
+        )
+
+        # ── UI Scale control (persists to config) ──
+        scale_f = ctk.CTkFrame(hdr_f, fg_color="transparent")
+        scale_f.grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(scale_f, text="UI Scale:", text_color="gray",
+                      font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=(0, 4))
+        conf = _read_config()
+        current_scale = conf.get("scale", "Auto")
+        self._scale_var = ctk.StringVar(value=current_scale)
+        self._scale_menu = ctk.CTkOptionMenu(
+            scale_f, variable=self._scale_var, values=SCALE_OPTIONS,
+            width=80, font=ctk.CTkFont(size=11), command=self._on_scale_change
+        )
+        self._scale_menu.grid(row=0, column=1)
         row += 1
 
-        # ── URL Entry ──
+        # ── URL Entry with clear button ──
         url_f = ctk.CTkFrame(p, fg_color="transparent")
-        url_f.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="ew")
+        url_f.grid(row=row, column=0, padx=16, pady=(8, 8), sticky="ew")
         url_f.grid_columnconfigure(0, weight=1)
+
         self.url_entry = ctk.CTkEntry(url_f, placeholder_text="Paste any supported URL…")
-        self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.url_entry.bind("<Return>", lambda e: self._fetch_info())
+        # FIX: Select all — Ctrl+A always works; click-to-focus selects after
+        # the Button-1 release so the cursor repositioning doesn't kill it.
+        self.url_entry.bind("<Control-a>", self._url_select_all)
+        self._url_had_focus = False
+        self.url_entry.bind("<FocusIn>", self._url_on_focus_in)
+        self.url_entry.bind("<ButtonRelease-1>", self._url_on_click_release)
+
+        self._url_clear_btn = ctk.CTkButton(
+            url_f, text="✕", width=32, fg_color="gray", hover_color="#666",
+            font=ctk.CTkFont(size=13), command=self._clear_url
+        )
+        self._url_clear_btn.grid(row=0, column=1, padx=(0, 4))
+
         self.fetch_btn = ctk.CTkButton(url_f, text="Fetch Info", width=100, command=self._fetch_info)
-        self.fetch_btn.grid(row=0, column=1)
+        self.fetch_btn.grid(row=0, column=2)
         row += 1
 
         # ── Info Display ──
@@ -300,7 +393,6 @@ class YtDlpGUI(ctk.CTk):
         left.grid(row=0, column=0, padx=(8, 4), pady=8, sticky="nsew")
         lr = 0
 
-        # Subtitles
         self.subs_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(left, text="Download subtitles", variable=self.subs_var,
                         command=self._toggle_subs).grid(row=lr, column=0, columnspan=2, sticky="w", pady=(0, 4))
@@ -322,7 +414,6 @@ class YtDlpGUI(ctk.CTk):
         self.subs_embed_cb.configure(state="disabled")
         lr += 1
 
-        # Thumbnail
         self.thumb_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(left, text="Save thumbnail", variable=self.thumb_var).grid(
             row=lr, column=0, columnspan=2, sticky="w", pady=(0, 4))
@@ -333,13 +424,11 @@ class YtDlpGUI(ctk.CTk):
             row=lr, column=0, columnspan=2, sticky="w", pady=(0, 8))
         lr += 1
 
-        # Chapters
         self.chapters_split_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(left, text="Split by chapters", variable=self.chapters_split_var).grid(
             row=lr, column=0, columnspan=2, sticky="w", pady=(0, 4))
         lr += 1
 
-        # Metadata
         self.meta_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(left, text="Embed metadata (title, artist, date)", variable=self.meta_var).grid(
             row=lr, column=0, columnspan=2, sticky="w", pady=(0, 4))
@@ -350,7 +439,6 @@ class YtDlpGUI(ctk.CTk):
         right.grid(row=0, column=1, padx=(4, 8), pady=8, sticky="nsew")
         rr = 0
 
-        # SponsorBlock
         self.sb_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(right, text="SponsorBlock", variable=self.sb_var,
                         command=self._toggle_sb).grid(row=rr, column=0, columnspan=2, sticky="w", pady=(0, 4))
@@ -367,7 +455,6 @@ class YtDlpGUI(ctk.CTk):
         self.sb_cats_label.grid(row=rr, column=1, sticky="w", padx=(8, 0), pady=(0, 4))
         rr += 1
 
-        # Category checkboxes in a sub-frame
         self.sb_cat_frame = ctk.CTkFrame(right, fg_color="transparent")
         self.sb_cat_frame.grid(row=rr, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.sb_cat_vars = {}
@@ -382,21 +469,18 @@ class YtDlpGUI(ctk.CTk):
             self.sb_cat_vars[cat] = (v, cb)
         rr += 1
 
-        # Rate limit
         ctk.CTkLabel(right, text="Rate limit:").grid(row=rr, column=0, sticky="w", pady=(0, 4))
         self.rate_var = ctk.StringVar(value="No limit")
         ctk.CTkOptionMenu(right, variable=self.rate_var, values=RATE_LIMITS, width=100).grid(
             row=rr, column=1, sticky="w", padx=(8, 0), pady=(0, 4))
         rr += 1
 
-        # Cookies from browser
         ctk.CTkLabel(right, text="Cookies from:").grid(row=rr, column=0, sticky="w", pady=(4, 4))
         self.cookie_var = ctk.StringVar(value="-- none --")
         ctk.CTkOptionMenu(right, variable=self.cookie_var, values=COOKIE_BROWSERS, width=120).grid(
             row=rr, column=1, sticky="w", padx=(8, 0), pady=(4, 4))
         rr += 1
 
-        # Archive file
         self.archive_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(right, text="Track downloads (skip duplicates)",
                         variable=self.archive_var).grid(
@@ -435,17 +519,102 @@ class YtDlpGUI(ctk.CTk):
         btn_f.grid(row=row, column=0, padx=16, pady=(0, 16), sticky="ew")
         btn_f.grid_columnconfigure(0, weight=1)
 
+        self.reset_btn = ctk.CTkButton(
+            btn_f, text="↺ Reset", fg_color="#555", hover_color="#777",
+            width=80, command=self._reset_all
+        )
+        self.reset_btn.grid(row=0, column=0, sticky="w")
+
         self.cancel_btn = ctk.CTkButton(
             btn_f, text="Cancel", fg_color="gray", hover_color="#666",
             width=100, command=self._cancel_download, state="disabled"
         )
-        self.cancel_btn.grid(row=0, column=0, padx=(0, 8), sticky="e")
+        self.cancel_btn.grid(row=0, column=1, padx=(0, 8), sticky="e")
 
         self.dl_btn = ctk.CTkButton(
             btn_f, text="⬇  Download", width=160,
             font=ctk.CTkFont(size=14, weight="bold"), command=self._start_download
         )
-        self.dl_btn.grid(row=0, column=1, sticky="e")
+        self.dl_btn.grid(row=0, column=2, sticky="e")
+
+    # ── URL helpers ───────────────────────────────────────────────────────────
+
+    def _url_select_all(self, event=None):
+        """Select all text in URL entry (Ctrl+A handler)."""
+        self.url_entry.select_range(0, "end")
+        self.url_entry.icursor("end")
+        return "break"  # Prevent default Ctrl+A behavior
+
+    def _url_on_focus_in(self, event=None):
+        """Flag that focus was just gained — next click-release will select all."""
+        self._url_had_focus = False
+
+    def _url_on_click_release(self, event=None):
+        """After the focus-granting click completes, select all text."""
+        if not self._url_had_focus:
+            self._url_had_focus = True
+            self.url_entry.select_range(0, "end")
+            self.url_entry.icursor("end")
+
+    def _clear_url(self):
+        """Clear URL entry and reset info display."""
+        self.url_entry.delete(0, "end")
+        self.info_label.configure(
+            text="Enter a URL and click Fetch Info to begin.", text_color="gray"
+        )
+        self._fetched_formats = []
+        self._video_info = None
+        self._on_mode_change()
+
+    # ── Full Reset ────────────────────────────────────────────────────────────
+
+    def _reset_all(self):
+        """Reset entire UI to initial state."""
+        # URL + info
+        self._clear_url()
+        # Mode back to video
+        self.mode_var.set("video")
+        self._build_video_opts()
+        # Output dir
+        self.dir_entry.delete(0, "end")
+        # Progress
+        self.progress_bar.set(0)
+        self._set_status("Idle")
+        self._log_clear()
+        # Extras — uncheck everything
+        self.subs_var.set(False)
+        self._toggle_subs()
+        self.thumb_var.set(False)
+        self.thumb_embed_var.set(False)
+        self.chapters_split_var.set(False)
+        self.meta_var.set(False)
+        self.sb_var.set(False)
+        self._toggle_sb()
+        self.rate_var.set("No limit")
+        self.cookie_var.set("-- none --")
+        self.archive_var.set(False)
+        # Buttons
+        self.dl_btn.configure(state="normal")
+        self.cancel_btn.configure(state="disabled")
+        self.fetch_btn.configure(state="normal", text="Fetch Info")
+
+    # ── Scale change handler ──────────────────────────────────────────────────
+
+    def _on_scale_change(self, choice):
+        conf = _read_config()
+        conf["scale"] = choice
+        _write_config(conf)
+        # Apply live — CTk's ScalingTracker propagates to all existing widgets
+        if choice == "Auto":
+            new_scale = _detect_scale()
+        else:
+            try:
+                new_scale = float(choice)
+            except ValueError:
+                new_scale = 1.0
+        ctk.set_widget_scaling(new_scale)
+        ctk.set_window_scaling(new_scale)
+        self._set_status(f"Scale set to {new_scale:.2f}×", color="green")
 
     # ── Toggle helpers ────────────────────────────────────────────────────────
 
@@ -614,7 +783,6 @@ class YtDlpGUI(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _browse_dir(self):
-        # SECURITY: title is hardcoded — never pass user input (CWE-78)
         path = _native_askdirectory(title="Select Download Directory")
         if path:
             self.dir_entry.delete(0, "end")
@@ -652,7 +820,6 @@ class YtDlpGUI(ctk.CTk):
             "postprocessors": [],
         }
 
-        # ── Audio mode ──
         if mode == "audio":
             opts["format"] = "bestaudio/best"
             opts["postprocessors"].append({
@@ -662,7 +829,6 @@ class YtDlpGUI(ctk.CTk):
             })
             del opts["merge_output_format"]
 
-        # ── Playlist mode ──
         if mode == "playlist":
             opts["outtmpl"]["default"] = "%(playlist_title)s/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s"
             opts["noplaylist"] = False
@@ -676,7 +842,6 @@ class YtDlpGUI(ctk.CTk):
                             "⚠ Invalid playlist range. Downloading all items."
                         ))
 
-        # ── Subtitles ──
         if self.subs_var.get():
             lang = self.subs_lang_var.get()
             opts["writesubtitles"] = True
@@ -686,24 +851,20 @@ class YtDlpGUI(ctk.CTk):
             if self.subs_embed_var.get():
                 opts["postprocessors"].append({"key": "FFmpegEmbedSubtitle"})
 
-        # ── Thumbnail ──
         if self.thumb_var.get():
             opts["writethumbnail"] = True
         if self.thumb_embed_var.get():
             opts["postprocessors"].append({"key": "EmbedThumbnail"})
 
-        # ── Metadata ──
         if self.meta_var.get():
             opts["postprocessors"].append({"key": "FFmpegMetadata"})
 
-        # ── Chapter splitting ──
         if self.chapters_split_var.get():
             opts["postprocessors"].append({
                 "key": "FFmpegSplitChapters",
                 "force_keyframes": False,
             })
 
-        # ── SponsorBlock ──
         if self.sb_var.get():
             cats = [c for c, (v, _) in self.sb_cat_vars.items() if v.get()]
             if cats:
@@ -723,17 +884,14 @@ class YtDlpGUI(ctk.CTk):
                         "categories": cats,
                     })
 
-        # ── Rate limit ──
         rl = self.rate_var.get()
         if rl != "No limit":
             opts["ratelimit"] = self._parse_rate(rl)
 
-        # ── Cookies ──
         browser = self.cookie_var.get()
         if browser != "-- none --":
             opts["cookiesfrombrowser"] = (browser,)
 
-        # ── Archive ──
         if self.archive_var.get():
             opts["download_archive"] = os.path.join(output_dir, ".ytdlp_archive.txt")
 
@@ -741,7 +899,6 @@ class YtDlpGUI(ctk.CTk):
 
     @staticmethod
     def _parse_rate(val: str) -> int | None:
-        """Convert rate limit string like '5M' to bytes/sec."""
         m = re.match(r'^(\d+)([KMG]?)$', val.strip(), re.IGNORECASE)
         if not m:
             return None
@@ -763,7 +920,6 @@ class YtDlpGUI(ctk.CTk):
 
         output_dir = self.dir_entry.get().strip()
         if not output_dir:
-            # SECURITY: title is hardcoded (CWE-78)
             output_dir = _native_askdirectory(title="Select Download Directory")
             if not output_dir:
                 return

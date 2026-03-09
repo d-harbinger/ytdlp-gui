@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────
-# install-desktop.sh — Bootstrap installer for yt-dlp GUI
+# install-desktop.sh — Bootstrap installer for yt-dlp GUI v1.3.0
 #
 # Creates venv, installs deps, generates .desktop file + icon,
-# and validates system dependencies (ffmpeg, python3).
+# creates config directory, and validates system dependencies.
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 APP_NAME="yt-dlp GUI"
 APP_ID="ytdlp-gui"
+APP_VERSION="1.3.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/venv"
 MAIN_SCRIPT="${SCRIPT_DIR}/ytdlp_gui.py"
@@ -16,6 +17,7 @@ ICON_DIR="${SCRIPT_DIR}/assets"
 ICON_FILE="${ICON_DIR}/icon.png"
 DESKTOP_DIR="${HOME}/.local/share/applications"
 DESKTOP_FILE="${DESKTOP_DIR}/${APP_ID}.desktop"
+CONFIG_DIR="${HOME}/.config/${APP_ID}"
 
 # ── Colors ──
 RED='\033[0;31m'
@@ -30,9 +32,12 @@ fail()  { echo -e "${RED}[✖]${NC} $*"; exit 1; }
 # ── Pre-flight checks ──
 echo ""
 echo "═══════════════════════════════════════════"
-echo "  ${APP_NAME} — Installer"
+echo "  ${APP_NAME} v${APP_VERSION} — Installer"
 echo "═══════════════════════════════════════════"
 echo ""
+
+# Verify main script exists
+[ -f "$MAIN_SCRIPT" ] || fail "Main script not found: ${MAIN_SCRIPT}"
 
 # Python 3.10+
 PYTHON=""
@@ -70,7 +75,6 @@ fi
 info "Creating virtual environment…"
 "$PYTHON" -m venv "$VENV_DIR"
 
-# Verify venv activation script exists
 [ -f "${VENV_DIR}/bin/activate" ] || fail "venv creation failed — missing activate script. Try: sudo apt install python3-venv python3-pip"
 source "${VENV_DIR}/bin/activate"
 info "venv activated: $(which python)"
@@ -83,22 +87,26 @@ info "Installing requirements…"
 if [ -f "${SCRIPT_DIR}/requirements.txt" ]; then
     pip install -r "${SCRIPT_DIR}/requirements.txt" --quiet
 else
-    # Fallback: install directly
     pip install customtkinter yt-dlp --quiet
 fi
 
 info "Dependencies installed."
 
-# ── Verify yt-dlp import ──
+# ── Verify imports ──
 python -c "import yt_dlp; print(f'  yt-dlp {yt_dlp.version.__version__}')" || fail "yt-dlp failed to import"
 python -c "import customtkinter; print(f'  CustomTkinter {customtkinter.__version__}')" || fail "CustomTkinter failed to import"
 
-# ── Create icon directory ──
+# ── Config directory ──
+mkdir -p "$CONFIG_DIR"
+info "Config directory: ${CONFIG_DIR}"
+if [ -f "${CONFIG_DIR}/settings.conf" ]; then
+    info "Existing settings.conf preserved."
+fi
+
+# ── Icon directory ──
 mkdir -p "$ICON_DIR"
 if [ ! -f "$ICON_FILE" ]; then
     warn "No icon.png found in assets/. You can add one later."
-    # Generate a placeholder SVG-to-PNG would require imagemagick,
-    # so we skip and let the app run without an icon.
 fi
 
 # ── Desktop Entry ──
@@ -119,7 +127,6 @@ EOF
 
 chmod +x "$DESKTOP_FILE"
 
-# Update desktop database if available
 if command -v update-desktop-database &>/dev/null; then
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 fi
@@ -133,5 +140,8 @@ echo -e "  ${GREEN}Installation complete!${NC}"
 echo ""
 echo "  Launch from your app menu, or run:"
 echo "    ${VENV_DIR}/bin/python ${MAIN_SCRIPT}"
+echo ""
+echo "  Config:  ${CONFIG_DIR}/settings.conf"
+echo "  Desktop: ${DESKTOP_FILE}"
 echo "═══════════════════════════════════════════"
 echo ""
