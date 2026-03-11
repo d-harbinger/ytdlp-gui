@@ -66,6 +66,15 @@ else
     warn "Install with: sudo apt install ffmpeg"
 fi
 
+# deno (required for YouTube — yt-dlp EJS challenge solver)
+if command -v deno &>/dev/null; then
+    info "deno: $(deno --version 2>&1 | head -1 | awk '{print $2}')"
+else
+    warn "deno not found. Required for YouTube downloads (EJS JS runtime)."
+    warn "Install with: curl -fsSL https://deno.land/install.sh | sh"
+    warn "Then add to PATH: export PATH=\"\$HOME/.deno/bin:\$PATH\""
+fi
+
 # ── Create / rebuild venv ──
 if [ -d "$VENV_DIR" ]; then
     warn "Existing venv found — rebuilding."
@@ -95,6 +104,7 @@ info "Dependencies installed."
 # ── Verify imports ──
 python -c "import yt_dlp; print(f'  yt-dlp {yt_dlp.version.__version__}')" || fail "yt-dlp failed to import"
 python -c "import customtkinter; print(f'  CustomTkinter {customtkinter.__version__}')" || fail "CustomTkinter failed to import"
+python -c "import yt_dlp_ejs; print(f'  yt-dlp-ejs {yt_dlp_ejs.__version__}')" || fail "yt-dlp-ejs failed to import"
 
 # ── Config directory ──
 mkdir -p "$CONFIG_DIR"
