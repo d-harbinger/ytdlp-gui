@@ -105,6 +105,7 @@ info "Dependencies installed."
 python -c "import yt_dlp; print(f'  yt-dlp {yt_dlp.version.__version__}')" || fail "yt-dlp failed to import"
 python -c "import customtkinter; print(f'  CustomTkinter {customtkinter.__version__}')" || fail "CustomTkinter failed to import"
 python -c "import yt_dlp_ejs; print(f'  yt-dlp-ejs {getattr(yt_dlp_ejs, \"__version__\", \"installed\")}')" || fail "yt-dlp-ejs failed to import"
+python -c "from youtube_transcript_api import YouTubeTranscriptApi; print('  youtube-transcript-api OK')" || fail "youtube-transcript-api failed to import"
 
 # ── Config directory ──
 mkdir -p "$CONFIG_DIR"
