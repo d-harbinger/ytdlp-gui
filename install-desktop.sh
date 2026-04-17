@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────
-# install-desktop.sh — Bootstrap installer for yt-dlp GUI v1.3.0
+# install-desktop.sh — Bootstrap installer for yt-dlp GUI v1.4.0
 #
 # Creates venv, installs deps, generates .desktop file + icon,
 # creates config directory, and validates system dependencies.
@@ -9,7 +9,7 @@ set -euo pipefail
 
 APP_NAME="yt-dlp GUI"
 APP_ID="ytdlp-gui"
-APP_VERSION="1.3.0"
+APP_VERSION="1.4.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/venv"
 MAIN_SCRIPT="${SCRIPT_DIR}/ytdlp_gui.py"
@@ -104,7 +104,7 @@ info "Dependencies installed."
 # ── Verify imports ──
 python -c "import yt_dlp; print(f'  yt-dlp {yt_dlp.version.__version__}')" || fail "yt-dlp failed to import"
 python -c "import customtkinter; print(f'  CustomTkinter {customtkinter.__version__}')" || fail "CustomTkinter failed to import"
-python -c "import yt_dlp_ejs; print(f'  yt-dlp-ejs {yt_dlp_ejs.__version__}')" || fail "yt-dlp-ejs failed to import"
+python -c "import yt_dlp_ejs; print(f'  yt-dlp-ejs {getattr(yt_dlp_ejs, \"__version__\", \"installed\")}')" || fail "yt-dlp-ejs failed to import"
 
 # ── Config directory ──
 mkdir -p "$CONFIG_DIR"

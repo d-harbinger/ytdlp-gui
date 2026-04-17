@@ -56,12 +56,22 @@ def _write_config(conf: dict):
         pass
 
 
+def _save_config_key(key: str, value: str):
+    conf = _read_config()
+    conf[key] = value
+    _write_config(conf)
+
+
 SCALE_OPTIONS = ["Auto", "1.0", "1.25", "1.5", "1.75", "2.0", "2.25", "2.5"]
 
 
-# ── HiDPI Auto-Scaling ────────────────────────────────────────────────────────
+# ── UI Scale Resolution ───────────────────────────────────────────────────────
+# Priority: env var > saved config > 1.0 default.
+# "Auto" in saved config resolves to 1.0 — on Linux every DPI-probing heuristic
+# (xrandr physical DPI, Xft.dpi, tkinter.winfo_fpixels) is unreliable across
+# VMs, XWayland, remote desktops, and misconfigured DEs. A predictable 1.0
+# default plus an in-UI Scale dropdown is the only thing that works everywhere.
 def _detect_scale():
-    # 1. Env var override — always wins
     env = os.environ.get("YTDLP_GUI_SCALE")
     if env:
         try:
@@ -69,45 +79,12 @@ def _detect_scale():
         except ValueError:
             pass
 
-    # 2. Saved config preference (skip if "Auto")
-    conf = _read_config()
-    saved = conf.get("scale", "Auto")
+    saved = _read_config().get("scale", "Auto")
     if saved != "Auto":
         try:
             return float(saved)
         except ValueError:
             pass
-
-    # 3. xrandr physical DPI — the only reliable method on X11
-    try:
-        out = subprocess.run(
-            ["xrandr"], capture_output=True, text=True, timeout=5
-        ).stdout
-        for line in out.splitlines():
-            if " connected" in line and "mm" in line:
-                res_match = re.search(r'(\d+)x(\d+)\+', line)
-                mm_match = re.search(r'(\d+)mm x (\d+)mm', line)
-                if res_match and mm_match:
-                    px_w = int(res_match.group(1))
-                    mm_w = int(mm_match.group(1))
-                    if mm_w > 0:
-                        real_dpi = px_w / (mm_w / 25.4)
-                        scale = real_dpi / 96.0
-                        return max(1.0, round(scale * 4) / 4)
-    except (subprocess.TimeoutExpired, OSError, ValueError):
-        pass
-
-    # 4. Tkinter DPI (works when DE reports correctly)
-    try:
-        r = tk.Tk()
-        r.withdraw()
-        dpi = r.winfo_fpixels("1i")
-        r.destroy()
-        scale = dpi / 96.0
-        if scale >= 1.25:
-            return round(scale * 4) / 4
-    except (tk.TclError, ValueError):
-        pass
 
     return 1.0
 
@@ -184,7 +161,7 @@ def _native_askdirectory(title="Select Directory"):
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 APP_NAME = "yt-dlp GUI"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 WINDOW_MIN_W = 740
 WINDOW_MIN_H = 700
 
@@ -285,6 +262,8 @@ class YtDlpGUI(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _build_ui(self):
+        conf = _read_config()
+
         # ── Scrollable container ──
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -340,14 +319,20 @@ class YtDlpGUI(ctk.CTk):
         self.url_entry.bind("<FocusIn>", self._url_on_focus_in)
         self.url_entry.bind("<ButtonRelease-1>", self._url_on_click_release)
 
+        self._url_paste_btn = ctk.CTkButton(
+            url_f, text="📋", width=32, fg_color="gray", hover_color="#666",
+            font=ctk.CTkFont(size=13), command=self._paste_url
+        )
+        self._url_paste_btn.grid(row=0, column=1, padx=(0, 4))
+
         self._url_clear_btn = ctk.CTkButton(
             url_f, text="✕", width=32, fg_color="gray", hover_color="#666",
             font=ctk.CTkFont(size=13), command=self._clear_url
         )
-        self._url_clear_btn.grid(row=0, column=1, padx=(0, 4))
+        self._url_clear_btn.grid(row=0, column=2, padx=(0, 4))
 
         self.fetch_btn = ctk.CTkButton(url_f, text="Fetch Info", width=100, command=self._fetch_info)
-        self.fetch_btn.grid(row=0, column=2)
+        self.fetch_btn.grid(row=0, column=3)
         row += 1
 
         # ── Info Display ──
@@ -365,7 +350,10 @@ class YtDlpGUI(ctk.CTk):
         ctk.CTkLabel(mode_f, text="Download Mode:", font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=0, columnspan=3, padx=12, pady=(8, 4), sticky="w"
         )
-        self.mode_var = ctk.StringVar(value="video")
+        saved_mode = conf.get("mode", "video")
+        if saved_mode not in ("video", "audio", "playlist"):
+            saved_mode = "video"
+        self.mode_var = ctk.StringVar(value=saved_mode)
         for i, (lbl, val) in enumerate([("🎬  Video", "video"), ("🎵  Audio Only", "audio"), ("📋  Playlist", "playlist")]):
             ctk.CTkRadioButton(mode_f, text=lbl, variable=self.mode_var, value=val,
                                command=self._on_mode_change).grid(row=1, column=i, padx=12, pady=(0, 8))
@@ -376,7 +364,7 @@ class YtDlpGUI(ctk.CTk):
         self.opts_frame.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="ew")
         self.opts_frame.grid_columnconfigure(1, weight=1)
         row += 1
-        self._build_video_opts()
+        self._on_mode_change()
 
         # ── Extras Section ──
         extras_label = ctk.CTkLabel(p, text="Extras", font=ctk.CTkFont(size=14, weight="bold"))
@@ -470,15 +458,25 @@ class YtDlpGUI(ctk.CTk):
         rr += 1
 
         ctk.CTkLabel(right, text="Rate limit:").grid(row=rr, column=0, sticky="w", pady=(0, 4))
-        self.rate_var = ctk.StringVar(value="No limit")
-        ctk.CTkOptionMenu(right, variable=self.rate_var, values=RATE_LIMITS, width=100).grid(
-            row=rr, column=1, sticky="w", padx=(8, 0), pady=(0, 4))
+        saved_rate = conf.get("rate_limit", "No limit")
+        if saved_rate not in RATE_LIMITS:
+            saved_rate = "No limit"
+        self.rate_var = ctk.StringVar(value=saved_rate)
+        ctk.CTkOptionMenu(
+            right, variable=self.rate_var, values=RATE_LIMITS, width=100,
+            command=lambda v: _save_config_key("rate_limit", v),
+        ).grid(row=rr, column=1, sticky="w", padx=(8, 0), pady=(0, 4))
         rr += 1
 
         ctk.CTkLabel(right, text="Cookies from:").grid(row=rr, column=0, sticky="w", pady=(4, 4))
-        self.cookie_var = ctk.StringVar(value="-- none --")
-        ctk.CTkOptionMenu(right, variable=self.cookie_var, values=COOKIE_BROWSERS, width=120).grid(
-            row=rr, column=1, sticky="w", padx=(8, 0), pady=(4, 4))
+        saved_cookie = conf.get("cookie_browser", "-- none --")
+        if saved_cookie not in COOKIE_BROWSERS:
+            saved_cookie = "-- none --"
+        self.cookie_var = ctk.StringVar(value=saved_cookie)
+        ctk.CTkOptionMenu(
+            right, variable=self.cookie_var, values=COOKIE_BROWSERS, width=120,
+            command=lambda v: _save_config_key("cookie_browser", v),
+        ).grid(row=rr, column=1, sticky="w", padx=(8, 0), pady=(4, 4))
         rr += 1
 
         self.archive_var = ctk.BooleanVar(value=False)
@@ -494,8 +492,17 @@ class YtDlpGUI(ctk.CTk):
         ctk.CTkLabel(dir_f, text="Save to:").grid(row=0, column=0, padx=(0, 8))
         self.dir_entry = ctk.CTkEntry(dir_f, placeholder_text="Select output directory…")
         self.dir_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        saved_dir = conf.get("save_dir", "")
+        if saved_dir and os.path.isdir(saved_dir):
+            self.dir_entry.insert(0, saved_dir)
+        self.dir_entry.bind("<FocusOut>", self._persist_dir_entry)
         self.browse_btn = ctk.CTkButton(dir_f, text="Browse…", width=90, command=self._browse_dir)
         self.browse_btn.grid(row=0, column=2)
+        self.open_dir_btn = ctk.CTkButton(
+            dir_f, text="📂", width=40, fg_color="gray", hover_color="#666",
+            font=ctk.CTkFont(size=13), command=self._open_output_dir
+        )
+        self.open_dir_btn.grid(row=0, column=3, padx=(8, 0))
         row += 1
 
         # ── Progress ──
@@ -509,6 +516,18 @@ class YtDlpGUI(ctk.CTk):
         row += 1
 
         # ── Log Output ──
+        log_hdr = ctk.CTkFrame(p, fg_color="transparent")
+        log_hdr.grid(row=row, column=0, padx=16, pady=(0, 2), sticky="ew")
+        log_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(log_hdr, text="Log", text_color="gray",
+                      font=ctk.CTkFont(size=11)).grid(row=0, column=0, sticky="w")
+        self.copy_log_btn = ctk.CTkButton(
+            log_hdr, text="Copy", width=60, fg_color="gray", hover_color="#666",
+            font=ctk.CTkFont(size=11), command=self._copy_log
+        )
+        self.copy_log_btn.grid(row=0, column=1, sticky="e")
+        row += 1
+
         self.log_box = ctk.CTkTextbox(p, height=100, state="disabled",
                                        font=ctk.CTkFont(family="monospace", size=11))
         self.log_box.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -566,17 +585,29 @@ class YtDlpGUI(ctk.CTk):
         self._video_info = None
         self._on_mode_change()
 
+    def _paste_url(self):
+        """Paste clipboard contents into the URL entry."""
+        try:
+            text = self.clipboard_get().strip()
+        except tk.TclError:
+            self._set_status("Clipboard is empty.", color="orange")
+            return
+        if not text:
+            return
+        self.url_entry.delete(0, "end")
+        self.url_entry.insert(0, text)
+        self.url_entry.focus_set()
+
     # ── Full Reset ────────────────────────────────────────────────────────────
 
     def _reset_all(self):
-        """Reset entire UI to initial state."""
+        """Reset entire UI to initial state. Save-dir is preserved."""
         # URL + info
         self._clear_url()
-        # Mode back to video
+        # Mode back to video (and persist)
         self.mode_var.set("video")
-        self._build_video_opts()
-        # Output dir
-        self.dir_entry.delete(0, "end")
+        self._on_mode_change()
+        # Output dir — keep persisted value, don't wipe
         # Progress
         self.progress_bar.set(0)
         self._set_status("Idle")
@@ -658,17 +689,33 @@ class YtDlpGUI(ctk.CTk):
         ctk.CTkLabel(self.opts_frame, text="Codec:", font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=0, padx=12, pady=8, sticky="w"
         )
-        self.audio_codec_var = ctk.StringVar(value="mp3")
-        ctk.CTkOptionMenu(self.opts_frame, variable=self.audio_codec_var, values=AUDIO_CODECS).grid(
-            row=0, column=1, padx=12, pady=8, sticky="w"
-        )
-        ctk.CTkLabel(self.opts_frame, text="Quality (kbps):").grid(
-            row=0, column=2, padx=(24, 8), pady=8, sticky="w"
-        )
+        conf = _read_config()
+        saved_codec = conf.get("audio_codec", "mp3")
+        if saved_codec not in AUDIO_CODECS:
+            saved_codec = "mp3"
+        self.audio_codec_var = ctk.StringVar(value=saved_codec)
+        ctk.CTkOptionMenu(
+            self.opts_frame, variable=self.audio_codec_var, values=AUDIO_CODECS,
+            command=self._on_audio_codec_change,
+        ).grid(row=0, column=1, padx=12, pady=8, sticky="w")
+        self.audio_quality_label = ctk.CTkLabel(self.opts_frame, text="Quality (kbps):")
+        self.audio_quality_label.grid(row=0, column=2, padx=(24, 8), pady=8, sticky="w")
         self.audio_quality_var = ctk.StringVar(value="192")
-        ctk.CTkOptionMenu(self.opts_frame, variable=self.audio_quality_var, values=AUDIO_QUALITIES).grid(
-            row=0, column=3, padx=12, pady=8, sticky="w"
+        self.audio_quality_menu = ctk.CTkOptionMenu(
+            self.opts_frame, variable=self.audio_quality_var, values=AUDIO_QUALITIES
         )
+        self.audio_quality_menu.grid(row=0, column=3, padx=12, pady=8, sticky="w")
+        self._on_audio_codec_change(saved_codec)
+
+    def _on_audio_codec_change(self, codec):
+        lossless = codec in ("flac", "wav")
+        if hasattr(self, "audio_quality_menu"):
+            self.audio_quality_menu.configure(state="disabled" if lossless else "normal")
+        if hasattr(self, "audio_quality_label"):
+            self.audio_quality_label.configure(
+                text="Lossless" if lossless else "Quality (kbps):"
+            )
+        _save_config_key("audio_codec", codec)
 
     def _build_playlist_opts(self):
         self._clear_opts()
@@ -693,6 +740,7 @@ class YtDlpGUI(ctk.CTk):
             self._build_audio_opts()
         elif m == "playlist":
             self._build_playlist_opts()
+        _save_config_key("mode", m)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Fetch Info
@@ -787,6 +835,30 @@ class YtDlpGUI(ctk.CTk):
         if path:
             self.dir_entry.delete(0, "end")
             self.dir_entry.insert(0, path)
+            _save_config_key("save_dir", path)
+
+    def _persist_dir_entry(self, _event=None):
+        path = self.dir_entry.get().strip()
+        if path and os.path.isdir(path):
+            _save_config_key("save_dir", path)
+
+    def _open_output_dir(self):
+        path = self.dir_entry.get().strip()
+        if not path:
+            self._set_status("No output directory selected.", color="orange")
+            return
+        if not os.path.isdir(path):
+            self._set_status("Directory does not exist yet.", color="orange")
+            return
+        opener = shutil.which("xdg-open") or shutil.which("gio")
+        if not opener:
+            self._set_status("No file manager opener found (xdg-open/gio).", color="red")
+            return
+        try:
+            args = [opener, "open", path] if opener.endswith("gio") else [opener, path]
+            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            self._set_status(f"Could not open folder: {e}", color="red")
 
     def _resolve_format_string(self):
         mode = self.mode_var.get()
@@ -822,11 +894,11 @@ class YtDlpGUI(ctk.CTk):
 
         if mode == "audio":
             opts["format"] = "bestaudio/best"
-            opts["postprocessors"].append({
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": self.audio_codec_var.get(),
-                "preferredquality": self.audio_quality_var.get(),
-            })
+            codec = self.audio_codec_var.get()
+            pp = {"key": "FFmpegExtractAudio", "preferredcodec": codec}
+            if codec not in ("flac", "wav"):
+                pp["preferredquality"] = self.audio_quality_var.get()
+            opts["postprocessors"].append(pp)
             del opts["merge_output_format"]
 
         if mode == "playlist":
@@ -1020,6 +1092,15 @@ class YtDlpGUI(ctk.CTk):
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
+
+    def _copy_log(self):
+        text = self.log_box.get("1.0", "end").strip()
+        if not text:
+            self._set_status("Log is empty.", color="orange")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._set_status("Log copied to clipboard.", color="green")
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
