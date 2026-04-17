@@ -14,7 +14,8 @@ import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog
-from datetime import timedelta
+from datetime import datetime, timedelta
+from pathlib import Path
 import urllib.parse
 
 import customtkinter as ctk
@@ -23,6 +24,12 @@ try:
     import yt_dlp
 except ImportError:
     print("ERROR: yt_dlp not found. Run: pip install yt-dlp")
+    sys.exit(1)
+
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+except ImportError:
+    print("ERROR: youtube-transcript-api not found. Run: pip install youtube-transcript-api")
     sys.exit(1)
 
 
@@ -190,6 +197,11 @@ COOKIE_BROWSERS = ["-- none --", "firefox", "chrome", "chromium", "brave", "edge
 
 RATE_LIMITS = ["No limit", "1M", "2M", "5M", "10M", "20M", "50M"]
 
+# ── Transcript mode ──
+TRANSCRIPT_FORMATS = [("Plain Text", "plain"), ("Markdown", "markdown"), ("Obsidian Note", "obsidian")]
+TRANSCRIPT_LANGS = ["auto", "en", "es", "fr", "de", "ja", "ko", "pt", "zh", "ar", "ru", "it", "nl"]
+MAX_TRANSCRIPT_VIDEOS = 500
+
 
 # ── Logger ────────────────────────────────────────────────────────────────────
 class GUILogger:
@@ -346,15 +358,21 @@ class YtDlpGUI(ctk.CTk):
         # ── Mode Selection ──
         mode_f = ctk.CTkFrame(p)
         mode_f.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="ew")
-        mode_f.grid_columnconfigure((0, 1, 2), weight=1)
-        ctk.CTkLabel(mode_f, text="Download Mode:", font=ctk.CTkFont(weight="bold")).grid(
-            row=0, column=0, columnspan=3, padx=12, pady=(8, 4), sticky="w"
+        mode_f.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        ctk.CTkLabel(mode_f, text="Mode:", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, columnspan=4, padx=12, pady=(8, 4), sticky="w"
         )
         saved_mode = conf.get("mode", "video")
-        if saved_mode not in ("video", "audio", "playlist"):
+        if saved_mode not in ("video", "audio", "playlist", "transcript"):
             saved_mode = "video"
         self.mode_var = ctk.StringVar(value=saved_mode)
-        for i, (lbl, val) in enumerate([("🎬  Video", "video"), ("🎵  Audio Only", "audio"), ("📋  Playlist", "playlist")]):
+        modes = [
+            ("🎬  Video", "video"),
+            ("🎵  Audio Only", "audio"),
+            ("📋  Playlist", "playlist"),
+            ("📝  Transcripts", "transcript"),
+        ]
+        for i, (lbl, val) in enumerate(modes):
             ctk.CTkRadioButton(mode_f, text=lbl, variable=self.mode_var, value=val,
                                command=self._on_mode_change).grid(row=1, column=i, padx=12, pady=(0, 8))
         row += 1
@@ -556,6 +574,10 @@ class YtDlpGUI(ctk.CTk):
         )
         self.dl_btn.grid(row=0, column=2, sticky="e")
 
+        # Sync label to saved mode (first _on_mode_change ran before dl_btn existed).
+        if self.mode_var.get() == "transcript":
+            self.dl_btn.configure(text="📝  Extract Transcripts")
+
     # ── URL helpers ───────────────────────────────────────────────────────────
 
     def _url_select_all(self, event=None):
@@ -732,6 +754,67 @@ class YtDlpGUI(ctk.CTk):
         self.playlist_range_entry = ctk.CTkEntry(self.opts_frame, placeholder_text="e.g. 1-10 or 1,3,5", width=120)
         self.playlist_range_entry.grid(row=0, column=3, padx=12, pady=8, sticky="w")
 
+    def _build_transcript_opts(self):
+        self._clear_opts()
+        conf = _read_config()
+
+        # Row 0: Format radios
+        ctk.CTkLabel(self.opts_frame, text="Format:", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, padx=12, pady=(8, 4), sticky="w"
+        )
+        saved_fmt = conf.get("transcript_format", "markdown")
+        if saved_fmt not in {v for _, v in TRANSCRIPT_FORMATS}:
+            saved_fmt = "markdown"
+        self.transcript_format_var = ctk.StringVar(value=saved_fmt)
+        fmt_frame = ctk.CTkFrame(self.opts_frame, fg_color="transparent")
+        fmt_frame.grid(row=0, column=1, columnspan=3, padx=12, pady=(8, 4), sticky="w")
+        for i, (lbl, val) in enumerate(TRANSCRIPT_FORMATS):
+            ctk.CTkRadioButton(
+                fmt_frame, text=lbl, variable=self.transcript_format_var, value=val,
+                command=lambda v=val: _save_config_key("transcript_format", v),
+            ).grid(row=0, column=i, padx=(0, 14), sticky="w")
+
+        # Row 1: Language + Timestamps + Per-file
+        ctk.CTkLabel(self.opts_frame, text="Language:").grid(
+            row=1, column=0, padx=12, pady=(4, 4), sticky="w"
+        )
+        saved_lang = conf.get("transcript_lang", "auto")
+        if saved_lang not in TRANSCRIPT_LANGS:
+            saved_lang = "auto"
+        self.transcript_lang_var = ctk.StringVar(value=saved_lang)
+        ctk.CTkOptionMenu(
+            self.opts_frame, variable=self.transcript_lang_var, values=TRANSCRIPT_LANGS,
+            width=90,
+            command=lambda v: _save_config_key("transcript_lang", v),
+        ).grid(row=1, column=1, padx=12, pady=(4, 4), sticky="w")
+
+        self.transcript_timestamps_var = ctk.BooleanVar(value=conf.get("transcript_ts", "0") == "1")
+        ctk.CTkCheckBox(
+            self.opts_frame, text="Timestamps", variable=self.transcript_timestamps_var,
+            command=lambda: _save_config_key(
+                "transcript_ts", "1" if self.transcript_timestamps_var.get() else "0"
+            ),
+        ).grid(row=1, column=2, padx=12, pady=(4, 4), sticky="w")
+
+        self.transcript_per_file_var = ctk.BooleanVar(value=conf.get("transcript_per_file", "0") == "1")
+        ctk.CTkCheckBox(
+            self.opts_frame, text="One file per video", variable=self.transcript_per_file_var,
+            command=lambda: _save_config_key(
+                "transcript_per_file", "1" if self.transcript_per_file_var.get() else "0"
+            ),
+        ).grid(row=1, column=3, padx=12, pady=(4, 4), sticky="w")
+
+        # Row 2: Playlist range (only meaningful for playlist URLs, but always shown)
+        ctk.CTkLabel(self.opts_frame, text="Items:").grid(
+            row=2, column=0, padx=12, pady=(4, 8), sticky="w"
+        )
+        self.transcript_range_entry = ctk.CTkEntry(
+            self.opts_frame,
+            placeholder_text="Playlist range — e.g. 1-10 or 1,3,5 (leave blank for all)",
+            width=320,
+        )
+        self.transcript_range_entry.grid(row=2, column=1, columnspan=3, padx=12, pady=(4, 8), sticky="ew")
+
     def _on_mode_change(self):
         m = self.mode_var.get()
         if m == "video":
@@ -740,7 +823,15 @@ class YtDlpGUI(ctk.CTk):
             self._build_audio_opts()
         elif m == "playlist":
             self._build_playlist_opts()
+        elif m == "transcript":
+            self._build_transcript_opts()
         _save_config_key("mode", m)
+        # Update download button label/icon to match mode
+        if hasattr(self, "dl_btn"):
+            if m == "transcript":
+                self.dl_btn.configure(text="📝  Extract Transcripts")
+            else:
+                self.dl_btn.configure(text="⬇  Download")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Fetch Info
@@ -791,7 +882,9 @@ class YtDlpGUI(ctk.CTk):
                     self.info_label.configure(text=display, text_color=("white", "white"))
                     self._set_status("Info fetched.", color="green")
                     self.fetch_btn.configure(state="normal", text="Fetch Info")
-                    if is_pl:
+                    # Auto-switch to playlist mode only if not already in
+                    # transcript mode (transcripts handle playlists natively).
+                    if is_pl and self.mode_var.get() != "transcript":
                         self.mode_var.set("playlist")
                         self._build_playlist_opts()
                     else:
@@ -1009,9 +1102,15 @@ class YtDlpGUI(ctk.CTk):
         self.dl_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
         self.progress_bar.set(0)
-        self._set_status("Starting download…")
         self._log_clear()
 
+        # Transcript mode takes a different path entirely (no yt-dlp download).
+        if self.mode_var.get() == "transcript":
+            self._set_status("Starting transcript extraction…")
+            self._start_transcript_extraction(url, output_dir)
+            return
+
+        self._set_status("Starting download…")
         opts = self._build_ydl_opts(output_dir)
 
         def _worker():
@@ -1074,6 +1173,340 @@ class YtDlpGUI(ctk.CTk):
         self.dl_btn.configure(state="normal")
         self.cancel_btn.configure(state="disabled")
         self._download_thread = None
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Transcript Extraction
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _fmt_ts(seconds: float) -> str:
+        total = int(seconds)
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    @staticmethod
+    def _safe_filename(name: str) -> str:
+        cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", name).strip().strip(".")
+        cleaned = re.sub(r'\s+', " ", cleaned)
+        return cleaned
+
+    @staticmethod
+    def _yaml_str(text: str) -> str:
+        """Escape a string for use inside a YAML double-quoted scalar."""
+        return (
+            text.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\r", " ")
+                .replace("\n", " ")
+        )
+
+    def _build_body_flat(self, data, include_ts: bool) -> str:
+        if include_ts:
+            return "\n".join(f"[{self._fmt_ts(s.start)}] {s.text}" for s in data)
+        return " ".join(s.text for s in data)
+
+    def _build_body_paragraphs(self, data, include_ts: bool) -> str:
+        paragraphs, current = [], []
+        para_start = 0.0
+        last_flush_ts = 0.0
+        for s in data:
+            if not current:
+                para_start = s.start
+            current.append(s.text)
+            if len(current) >= 5 or (s.start - last_flush_ts) >= 30:
+                txt = " ".join(current)
+                if include_ts:
+                    txt = f"**[{self._fmt_ts(para_start)}]** {txt}"
+                paragraphs.append(txt)
+                current, last_flush_ts = [], s.start
+        if current:
+            txt = " ".join(current)
+            if include_ts:
+                txt = f"**[{self._fmt_ts(para_start)}]** {txt}"
+            paragraphs.append(txt)
+        return "\n\n".join(paragraphs)
+
+    def _format_single_transcript(self, fmt: str, include_ts: bool,
+                                   video_id: str, video_title: str, data) -> str:
+        if fmt == "plain":
+            return self._build_body_flat(data, include_ts)
+
+        body = self._build_body_paragraphs(data, include_ts)
+        url = f"https://youtube.com/watch?v={video_id}"
+
+        if fmt == "markdown":
+            header = (
+                f"# {video_title}\n\n"
+                f"**Video ID:** {video_id}\n"
+                f"**Source:** {url}\n"
+                f"**Extracted:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                "---\n\n"
+            )
+            return header + body
+
+        # obsidian
+        front = (
+            "---\n"
+            f'title: "{self._yaml_str(video_title)}"\n'
+            f"source: {url}\n"
+            "type: video-transcript\n"
+            f"created: {datetime.now().strftime('%Y-%m-%d')}\n"
+            "tags:\n  - youtube\n  - transcript\n"
+            "---\n\n"
+            f"# {video_title}\n\n"
+            f"🔗 [Watch on YouTube]({url})\n\n"
+            "## Transcript\n\n"
+        )
+        return front + body
+
+    def _format_playlist_transcripts(self, fmt: str, include_ts: bool,
+                                      playlist_title: str, videos: list[dict]) -> str:
+        ok_count = sum(1 for v in videos if v["data"] is not None)
+        total = len(videos)
+        lines: list[str] = []
+
+        if fmt == "markdown":
+            lines.append(f"# {playlist_title}\n\n")
+            lines.append(f"**Extracted:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+            lines.append(f"**Transcripts available:** {ok_count} / {total}\n\n---\n")
+        elif fmt == "obsidian":
+            lines.append("---\n")
+            lines.append(f'title: "{self._yaml_str(playlist_title)}"\n')
+            lines.append("type: playlist-transcript\n")
+            lines.append(f"created: {datetime.now().strftime('%Y-%m-%d')}\n")
+            lines.append(f"videos: {ok_count}\n")
+            lines.append("tags:\n  - youtube\n  - transcript\n  - playlist\n")
+            lines.append("---\n\n")
+            lines.append(f"# {playlist_title}\n\n")
+            lines.append(f"**Transcripts available:** {ok_count} / {total}\n")
+        else:
+            bar = "=" * max(10, len(playlist_title))
+            lines.append(f"{playlist_title}\n{bar}\n")
+            lines.append(f"Transcripts available: {ok_count} / {total}\n")
+
+        for i, v in enumerate(videos, 1):
+            url = f"https://youtube.com/watch?v={v['id']}"
+            if fmt == "markdown":
+                lines.append(f"\n## {i}. {v['title']}\n\n🔗 {url}\n\n")
+            elif fmt == "obsidian":
+                lines.append(f"\n## {i}. {v['title']}\n\n🔗 [Watch]({url})\n\n")
+            else:
+                lines.append(f"\n--- Video {i}: {v['title']} ---\n\n")
+
+            if v["data"] is None:
+                note = f"[No transcript available: {v['error']}]"
+                lines.append((note if fmt == "plain" else f"*{note}*") + "\n")
+                if fmt in ("markdown", "obsidian"):
+                    lines.append("\n---\n")
+                continue
+
+            if fmt == "plain":
+                lines.append(self._build_body_flat(v["data"], include_ts) + "\n")
+            else:
+                lines.append(self._build_body_paragraphs(v["data"], include_ts) + "\n\n---\n")
+
+        return "".join(lines)
+
+    def _resolve_videos(self, url: str) -> tuple[str, list[tuple[str, str]]]:
+        """Use yt_dlp (already a dep) to resolve URL → (collection_title, [(id, title), ...]).
+
+        For a single video URL, returns (video_title, [(id, title)]).
+        For a playlist, returns (playlist_title, [(id, title), ...]) for all entries.
+        """
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": "in_playlist",
+            "skip_download": True,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if info is None:
+            raise RuntimeError("Could not resolve URL.")
+
+        if info.get("_type") == "playlist" or "entries" in info:
+            title = (info.get("title") or "YouTube Playlist").strip()
+            entries = []
+            for e in info.get("entries") or []:
+                if not e:
+                    continue
+                vid = e.get("id")
+                vtitle = (e.get("title") or "").strip() or f"Video {vid}"
+                if vid:
+                    entries.append((vid, vtitle))
+            return title, entries
+
+        vid = info.get("id")
+        vtitle = (info.get("title") or "").strip() or f"Video {vid}"
+        return vtitle, [(vid, vtitle)]
+
+    def _start_transcript_extraction(self, url: str, output_dir: str):
+        """Run transcript extraction in a background thread with progress + cancel."""
+        fmt = self.transcript_format_var.get()
+        include_ts = self.transcript_timestamps_var.get()
+        per_file = self.transcript_per_file_var.get()
+        lang = self.transcript_lang_var.get()
+        rng = self.transcript_range_entry.get().strip()
+
+        if rng and not _validate_playlist_range(rng):
+            self._set_status("Invalid playlist range. Use formats like 1-10 or 1,3,5.", color="red")
+            self._download_finished()
+            return
+
+        ext = ".md" if fmt in ("markdown", "obsidian") else ".txt"
+
+        def _worker():
+            try:
+                self.after(0, lambda: self._set_status("Resolving URL…"))
+                self.after(0, lambda: self._log_append(f"→ Resolving: {url}"))
+
+                collection_title, all_entries = self._resolve_videos(url)
+                if not all_entries:
+                    raise RuntimeError("No videos found for this URL.")
+
+                # Apply playlist range filter (if any) for multi-video URLs.
+                entries = self._apply_range(all_entries, rng) if (len(all_entries) > 1 and rng) else all_entries
+
+                if len(entries) > MAX_TRANSCRIPT_VIDEOS:
+                    self.after(0, lambda: self._log_append(
+                        f"⚠ Capping at {MAX_TRANSCRIPT_VIDEOS} videos (was {len(entries)})."
+                    ))
+                    entries = entries[:MAX_TRANSCRIPT_VIDEOS]
+
+                is_collection = len(entries) > 1
+                total = len(entries)
+                self.after(0, lambda: self._log_append(
+                    f"✓ {total} video(s) to process.  Format: {fmt}.  Lang: {lang}.  Per-file: {per_file}"
+                ))
+
+                ytt = YouTubeTranscriptApi()
+                videos: list[dict] = []
+                for i, (vid, vtitle) in enumerate(entries, 1):
+                    if self._cancel_flag.is_set():
+                        self.after(0, lambda: self._set_status("Cancelled.", color="orange"))
+                        return
+
+                    short = (vtitle[:60] + "…") if len(vtitle) > 61 else vtitle
+                    self.after(0, lambda i=i, t=short: self._set_status(
+                        f"[{i}/{total}] {t}"
+                    ))
+                    self.after(0, lambda p=i / total: self.progress_bar.set(p))
+
+                    entry = {"id": vid, "title": vtitle, "data": None, "error": None}
+                    try:
+                        if lang != "auto":
+                            entry["data"] = ytt.fetch(vid, languages=[lang])
+                        else:
+                            # "auto" = any available transcript. The 1.x API's
+                            # fetch() default is languages=('en',), so we must
+                            # list first and pick any entry.
+                            tl = ytt.list(vid)
+                            picked = next(iter(tl), None)
+                            if picked is None:
+                                raise RuntimeError("no transcripts listed")
+                            entry["data"] = picked.fetch()
+                        self.after(0, lambda t=short: self._log_append(f"✔ [{t}]"))
+                    except Exception as ex:
+                        entry["error"] = (str(ex).splitlines()[0] or "no transcript")[:200]
+                        self.after(0, lambda t=short, e=entry["error"]: self._log_append(
+                            f"✖ [{t}] {e}"
+                        ))
+                    videos.append(entry)
+
+                # Write to disk
+                target = Path(output_dir)
+                target.mkdir(parents=True, exist_ok=True)
+                written = self._write_transcripts(
+                    videos, collection_title, target, fmt, ext, include_ts, per_file, is_collection
+                )
+
+                ok = sum(1 for v in videos if v["data"] is not None)
+                self.after(0, lambda: self.progress_bar.set(1.0))
+                self.after(0, lambda: self._set_status(
+                    f"✔ {ok}/{total} extracted  ·  wrote {written} file(s)", color="green"
+                ))
+            except Exception as e:
+                msg = str(e)
+                self.after(0, lambda: self._set_status(f"Transcript error: {msg}", color="red"))
+                self.after(0, lambda: self._log_append(f"✖ {msg}"))
+            finally:
+                self.after(0, self._download_finished)
+
+        self._download_thread = threading.Thread(target=_worker, daemon=True)
+        self._download_thread.start()
+
+    @staticmethod
+    def _apply_range(entries: list[tuple[str, str]], rng: str) -> list[tuple[str, str]]:
+        """Apply yt-dlp-style range spec ('1-10', '1,3,5', '5-') to entries.
+
+        Silently skips unparseable parts (including slice syntax like '1:5'
+        which the shared validator permits for yt-dlp playlist mode but we
+        don't support when driving youtube-transcript-api ourselves).
+        """
+        keep: set[int] = set()
+        n = len(entries)
+        for part in rng.split(","):
+            part = part.strip()
+            if not part or ":" in part:
+                continue
+            try:
+                if "-" in part:
+                    a, b = part.split("-", 1)
+                    a_i = int(a) if a.strip() else 1
+                    b_i = int(b) if b.strip() else n
+                    for i in range(a_i, b_i + 1):
+                        if 1 <= i <= n:
+                            keep.add(i)
+                else:
+                    i = int(part)
+                    if 1 <= i <= n:
+                        keep.add(i)
+            except ValueError:
+                continue
+        return [entries[i - 1] for i in sorted(keep)]
+
+    def _write_transcripts(self, videos: list[dict], collection_title: str,
+                            target: Path, fmt: str, ext: str, include_ts: bool,
+                            per_file: bool, is_collection: bool) -> int:
+        """Write transcripts to disk. Returns count of files written."""
+        if not is_collection:
+            v = videos[0]
+            if v["data"] is None:
+                raise RuntimeError(f"No transcript available: {v['error']}")
+            content = self._format_single_transcript(fmt, include_ts, v["id"], v["title"], v["data"])
+            safe = self._safe_filename(v["title"])[:80] or v["id"]
+            out_path = target / f"{safe} [{v['id']}]{ext}"
+            out_path.write_text(content, encoding="utf-8")
+            self.after(0, lambda p=out_path: self._log_append(f"📄 Wrote: {p.name}"))
+            return 1
+
+        # Collection (playlist or multi-video resolution)
+        if per_file:
+            subdir_name = self._safe_filename(collection_title)[:80] or "playlist"
+            subdir = target / subdir_name
+            subdir.mkdir(parents=True, exist_ok=True)
+            written = 0
+            pad = len(str(len(videos)))
+            for i, v in enumerate(videos, 1):
+                if v["data"] is None:
+                    continue
+                content = self._format_single_transcript(fmt, include_ts, v["id"], v["title"], v["data"])
+                safe = self._safe_filename(v["title"])[:80] or v["id"]
+                out_path = subdir / f"{str(i).zfill(pad)} - {safe} [{v['id']}]{ext}"
+                out_path.write_text(content, encoding="utf-8")
+                written += 1
+            self.after(0, lambda d=subdir, w=written: self._log_append(f"📁 Wrote {w} file(s) to: {d.name}/"))
+            return written
+
+        # Concatenated single file
+        content = self._format_playlist_transcripts(fmt, include_ts, collection_title, videos)
+        safe = self._safe_filename(collection_title)[:80] or "playlist"
+        out_path = target / f"{safe}_transcripts{ext}"
+        out_path.write_text(content, encoding="utf-8")
+        self.after(0, lambda p=out_path: self._log_append(f"📄 Wrote: {p.name}"))
+        return 1
 
     # ═══════════════════════════════════════════════════════════════════════════
     # UI Helpers
