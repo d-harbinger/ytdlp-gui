@@ -6,13 +6,18 @@ format selection, subtitles, SponsorBlock, metadata embedding, chapter
 splitting, thumbnail extraction, rate limiting, and archive tracking.
 """
 
+import json
 import os
 import sys
 import re
+import random
 import shutil
 import subprocess
+import tempfile
 import threading
+import time
 import tkinter as tk
+from dataclasses import dataclass
 from tkinter import filedialog
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,6 +36,147 @@ try:
 except ImportError:
     print("ERROR: youtube-transcript-api not found. Run: pip install youtube-transcript-api")
     sys.exit(1)
+
+# Rate-limit exception classes from youtube-transcript-api 1.x. Imported
+# defensively: older/newer versions may shuffle the public surface, so we fall
+# back to message-string matching in `_is_transcript_rate_limit_error` if any
+# of these are missing.
+_TRANSCRIPT_RATE_LIMIT_EXC: tuple = ()
+for _name in ("IpBlocked", "RequestBlocked", "TooManyRequests", "YouTubeRequestFailed"):
+    try:
+        _TRANSCRIPT_RATE_LIMIT_EXC += (getattr(__import__("youtube_transcript_api", fromlist=[_name]), _name),)
+    except (ImportError, AttributeError):
+        pass
+
+
+def _is_transcript_rate_limit_error(exc: BaseException) -> bool:
+    if _TRANSCRIPT_RATE_LIMIT_EXC and isinstance(exc, _TRANSCRIPT_RATE_LIMIT_EXC):
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in (
+        "too many requests", "429", "ip blocked", "ip-blocked",
+        "ipblocked", "request blocked", "requestblocked", "blocked by youtube",
+        "youtube is blocking", "youtuberequestfailed",
+    ))
+
+
+# Transcript-loop pacing + retry tuning. Designed for "let it finish in one
+# go even on a 121-video playlist" rather than "fastest possible".
+TRANSCRIPT_BASE_DELAY = 1.5         # seconds between successive video fetches
+TRANSCRIPT_BASE_JITTER = 0.6        # +random[0, jitter] on each delay
+TRANSCRIPT_MAX_RETRIES = 4          # per-video retries on rate-limit errors
+TRANSCRIPT_BACKOFF_BASE = 8.0       # first backoff (s); doubles each retry
+TRANSCRIPT_BACKOFF_CAP = 240.0      # max backoff (s) per retry
+TRANSCRIPT_THROTTLE_FLOOR = 5.0     # once throttled, raise base delay to ≥ this
+# Circuit breaker: if N consecutive videos each fully exhaust their retries
+# with rate-limit errors AND the yt-dlp fallback also fails, the network is
+# hard-blocked at every endpoint we know how to reach. Abort fast.
+# 1 = abort after the very first fully-failed video — that's already proof.
+TRANSCRIPT_HARD_BLOCK_THRESHOLD = 1
+
+
+@dataclass
+class _TranscriptSnippet:
+    """Minimal mirror of youtube_transcript_api's FetchedTranscriptSnippet.
+    The transcript formatters iterate over snippets reading .start and .text;
+    keeping the same attribute shape lets yt-dlp-sourced data flow through
+    the existing format pipeline unchanged.
+    """
+    text: str
+    start: float
+    duration: float
+
+
+def _parse_json3_captions(raw: str) -> list[_TranscriptSnippet]:
+    """Parse YouTube's json3 caption format into our snippet shape.
+
+    json3 events look like: {"tStartMs": 1234, "dDurationMs": 5678,
+    "segs": [{"utf8": "Hello"}, {"utf8": " world"}]}. Some events have no
+    `segs` (caption track formatting markers) — skip those.
+    """
+    data = json.loads(raw)
+    snippets: list[_TranscriptSnippet] = []
+    for ev in data.get("events", []):
+        segs = ev.get("segs")
+        if not segs:
+            continue
+        text = "".join(s.get("utf8", "") for s in segs).replace("\n", " ").strip()
+        if not text:
+            continue
+        start_ms = ev.get("tStartMs", 0) or 0
+        dur_ms = ev.get("dDurationMs", 0) or 0
+        snippets.append(_TranscriptSnippet(
+            text=text,
+            start=start_ms / 1000.0,
+            duration=dur_ms / 1000.0,
+        ))
+    return snippets
+
+
+# yt-dlp player clients used for transcript extraction. Order matters: yt-dlp
+# tries them left to right and uses the first one that returns playable info.
+# Empirically validated 2026-05-01 against an IP that had been bot-checked by
+# the default mix (web / web_safari): `web_embedded` (the iframe-embed client
+# used for video embeds on third-party sites) routes through a less-policed
+# endpoint and works without cookies or a YouTube account. `tv` and
+# `android_vr` are kept as additional fallbacks for the rare cases where
+# `web_embedded` itself is restricted.
+TRANSCRIPT_YT_DLP_PLAYER_CLIENTS = ["tv", "android_vr", "web_embedded"]
+
+
+def _fetch_transcript_via_yt_dlp(vid: str, lang: str,
+                                  cookies_browser: str | None = None) -> list[_TranscriptSnippet]:
+    """Fallback transcript fetcher that goes through yt-dlp instead of
+    youtube-transcript-api. Uses a hand-picked player-client list that
+    avoids the bot-checked `web` / `web_safari` clients — works without
+    cookies or a YouTube account on most networks.
+
+    `cookies_browser` (firefox/chrome/etc.) is optional: pass it when the
+    user is logged into YouTube and wants extra cred for borderline cases.
+    Won't help users without a YouTube account; the player-client tweak is
+    what actually breaks through the bot-check.
+
+    Raises RuntimeError on any failure (no captions found, yt-dlp blocked
+    too, parse failure, etc.) — the caller decides whether to count it as
+    rate-limit-shaped for circuit-breaker purposes.
+    """
+    url = f"https://www.youtube.com/watch?v={vid}"
+    # "auto" means "any English-ish track we can find". Listing variants
+    # explicitly is more reliable than yt-dlp's own auto-selection here.
+    sub_langs = [lang] if lang != "auto" else ["en", "en-US", "en-GB", "en.*"]
+
+    with tempfile.TemporaryDirectory(prefix="ytdlp-gui-trans-") as td:
+        opts = {
+            "skip_download": True,
+            "writeautomaticsub": True,
+            "writesubtitles": True,
+            "subtitlesformat": "json3",
+            "subtitleslangs": sub_langs,
+            "outtmpl": os.path.join(td, "%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "ignoreerrors": False,
+            "extractor_args": {
+                "youtube": {"player_client": TRANSCRIPT_YT_DLP_PLAYER_CLIENTS},
+            },
+        }
+        if cookies_browser:
+            opts["cookiesfrombrowser"] = (cookies_browser,)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info(url, download=True)
+
+        # yt-dlp inserts the language code before the extension:
+        # "{vid}.{lang}.json3" (e.g. "KiEptGbnEBc.en.json3").
+        files = sorted(Path(td).glob(f"{vid}.*.json3"))
+        if not files:
+            raise RuntimeError("yt-dlp produced no captions file")
+        raw = files[0].read_text(encoding="utf-8")
+
+    snippets = _parse_json3_captions(raw)
+    if not snippets:
+        raise RuntimeError("yt-dlp captions were empty")
+    return snippets
 
 
 # ── Persistent Config ─────────────────────────────────────────────────────────
@@ -377,6 +523,15 @@ class YtDlpGUI(ctk.CTk):
                                command=self._on_mode_change).grid(row=1, column=i, padx=12, pady=(0, 8))
         row += 1
 
+        # Persistent state vars created here (before the first
+        # _on_mode_change call) so transcript-mode opts can read them.
+        # The matching widgets in the Extras section bind to these existing
+        # vars rather than creating their own.
+        saved_cookie = conf.get("cookie_browser", "-- none --")
+        if saved_cookie not in COOKIE_BROWSERS:
+            saved_cookie = "-- none --"
+        self.cookie_var = ctk.StringVar(value=saved_cookie)
+
         # ── Format Options (swaps per mode) ──
         self.opts_frame = ctk.CTkFrame(p)
         self.opts_frame.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -385,13 +540,19 @@ class YtDlpGUI(ctk.CTk):
         self._on_mode_change()
 
         # ── Extras Section ──
-        extras_label = ctk.CTkLabel(p, text="Extras", font=ctk.CTkFont(size=14, weight="bold"))
-        extras_label.grid(row=row, column=0, padx=16, pady=(8, 4), sticky="w")
+        # Stored on self so _on_mode_change can hide the whole section in
+        # transcript mode — every Extras control is a yt-dlp download option
+        # and none of them reach the youtube-transcript-api code path.
+        self.extras_label = ctk.CTkLabel(p, text="Extras", font=ctk.CTkFont(size=14, weight="bold"))
+        self.extras_label.grid(row=row, column=0, padx=16, pady=(8, 4), sticky="w")
+        self._extras_label_grid = {"row": row, "column": 0, "padx": 16, "pady": (8, 4), "sticky": "w"}
         row += 1
 
-        extras_f = ctk.CTkFrame(p)
-        extras_f.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="ew")
-        extras_f.grid_columnconfigure((0, 1), weight=1)
+        self.extras_frame = ctk.CTkFrame(p)
+        self.extras_frame.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="ew")
+        self.extras_frame.grid_columnconfigure((0, 1), weight=1)
+        self._extras_frame_grid = {"row": row, "column": 0, "padx": 16, "pady": (0, 8), "sticky": "ew"}
+        extras_f = self.extras_frame
         row += 1
 
         # ── Left column: Subtitles, Thumbnails, Chapters, Metadata ──
@@ -487,10 +648,8 @@ class YtDlpGUI(ctk.CTk):
         rr += 1
 
         ctk.CTkLabel(right, text="Cookies from:").grid(row=rr, column=0, sticky="w", pady=(4, 4))
-        saved_cookie = conf.get("cookie_browser", "-- none --")
-        if saved_cookie not in COOKIE_BROWSERS:
-            saved_cookie = "-- none --"
-        self.cookie_var = ctk.StringVar(value=saved_cookie)
+        # cookie_var is created earlier in _setup_ui — bind to the existing
+        # StringVar so the transcript-mode dropdown stays in sync.
         ctk.CTkOptionMenu(
             right, variable=self.cookie_var, values=COOKIE_BROWSERS, width=120,
             command=lambda v: _save_config_key("cookie_browser", v),
@@ -574,9 +733,13 @@ class YtDlpGUI(ctk.CTk):
         )
         self.dl_btn.grid(row=0, column=2, sticky="e")
 
-        # Sync label to saved mode (first _on_mode_change ran before dl_btn existed).
-        if self.mode_var.get() == "transcript":
-            self.dl_btn.configure(text="📝  Extract Transcripts")
+        # Re-run _on_mode_change now that ALL widgets exist (dl_btn,
+        # extras_frame, etc.). The earlier call during opts_frame creation
+        # ran while those late-built widgets were still missing, so the
+        # button-label and Extras-visibility branches were skipped.
+        # _build_*_opts is idempotent (it calls _clear_opts first), so this
+        # extra invocation is safe and just resyncs everything.
+        self._on_mode_change()
 
     # ── URL helpers ───────────────────────────────────────────────────────────
 
@@ -806,14 +969,32 @@ class YtDlpGUI(ctk.CTk):
 
         # Row 2: Playlist range (only meaningful for playlist URLs, but always shown)
         ctk.CTkLabel(self.opts_frame, text="Items:").grid(
-            row=2, column=0, padx=12, pady=(4, 8), sticky="w"
+            row=2, column=0, padx=12, pady=(4, 4), sticky="w"
         )
         self.transcript_range_entry = ctk.CTkEntry(
             self.opts_frame,
             placeholder_text="Playlist range — e.g. 1-10 or 1,3,5 (leave blank for all)",
             width=320,
         )
-        self.transcript_range_entry.grid(row=2, column=1, columnspan=3, padx=12, pady=(4, 8), sticky="ew")
+        self.transcript_range_entry.grid(row=2, column=1, columnspan=3, padx=12, pady=(4, 4), sticky="ew")
+
+        # Row 3: Cookies-from-browser. Used by the yt-dlp fallback path when
+        # the API is rate-limited and YouTube demands "Sign in to confirm
+        # you're not a bot". Bound to self.cookie_var so it stays in sync
+        # with the (currently hidden) Extras dropdown.
+        ctk.CTkLabel(self.opts_frame, text="Cookies from:").grid(
+            row=3, column=0, padx=12, pady=(4, 8), sticky="w"
+        )
+        ctk.CTkOptionMenu(
+            self.opts_frame, variable=self.cookie_var, values=COOKIE_BROWSERS,
+            width=120,
+            command=lambda v: _save_config_key("cookie_browser", v),
+        ).grid(row=3, column=1, padx=12, pady=(4, 8), sticky="w")
+        ctk.CTkLabel(
+            self.opts_frame,
+            text="(only needed for age-restricted or members-only videos — leave at \"none\" otherwise)",
+            text_color="gray", font=ctk.CTkFont(size=11),
+        ).grid(row=3, column=2, columnspan=2, padx=(0, 12), pady=(4, 8), sticky="w")
 
     def _on_mode_change(self):
         m = self.mode_var.get()
@@ -832,6 +1013,16 @@ class YtDlpGUI(ctk.CTk):
                 self.dl_btn.configure(text="📝  Extract Transcripts")
             else:
                 self.dl_btn.configure(text="⬇  Download")
+        # Extras section is yt-dlp-only — hide in transcript mode so the user
+        # can't waste time tuning rate-limit/cookies/etc. that never reach the
+        # youtube-transcript-api path.
+        if hasattr(self, "extras_frame"):
+            if m == "transcript":
+                self.extras_label.grid_remove()
+                self.extras_frame.grid_remove()
+            else:
+                self.extras_label.grid(**self._extras_label_grid)
+                self.extras_frame.grid(**self._extras_frame_grid)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Fetch Info
@@ -1381,39 +1572,206 @@ class YtDlpGUI(ctk.CTk):
                     f"✓ {total} video(s) to process.  Format: {fmt}.  Lang: {lang}.  Per-file: {per_file}"
                 ))
 
+                # Resolve cookies-from-browser once for the whole run.
+                cookie_browser = self.cookie_var.get()
+                if cookie_browser == "-- none --":
+                    cookie_browser = None
+
                 ytt = YouTubeTranscriptApi()
                 videos: list[dict] = []
+                # Adaptive base pacing: starts low, ratchets up the first time
+                # YouTube rate-limits us so the rest of the run stays under the
+                # threshold rather than re-tripping it every video.
+                adaptive_delay = TRANSCRIPT_BASE_DELAY
+                # Circuit-breaker counter: incremented when both the API AND
+                # the yt-dlp fallback fail for a video with rate-limit-shaped
+                # errors. Reset on any success or non-rate-limit failure.
+                consecutive_rl_failures = 0
+                hard_blocked = False
+                # Once the yt-dlp fallback proves successful, skip the API for
+                # all remaining videos — the API is clearly blocked on this
+                # network and grinding through retries wastes ~2 min per video.
+                yt_dlp_sticky = False
+
+                def _interruptible_sleep(secs: float) -> bool:
+                    """Sleep up to `secs`, returning True if cancelled mid-wait."""
+                    end = time.monotonic() + secs
+                    while time.monotonic() < end:
+                        if self._cancel_flag.is_set():
+                            return True
+                        time.sleep(min(0.5, end - time.monotonic()))
+                    return False
+
                 for i, (vid, vtitle) in enumerate(entries, 1):
                     if self._cancel_flag.is_set():
                         self.after(0, lambda: self._set_status("Cancelled.", color="orange"))
                         return
 
                     short = (vtitle[:60] + "…") if len(vtitle) > 61 else vtitle
+
+                    # Pace requests (skip before the first one). Small jitter
+                    # avoids robotic timing patterns YouTube can flag on.
+                    if i > 1:
+                        if _interruptible_sleep(adaptive_delay + random.uniform(0, TRANSCRIPT_BASE_JITTER)):
+                            self.after(0, lambda: self._set_status("Cancelled.", color="orange"))
+                            return
+
                     self.after(0, lambda i=i, t=short: self._set_status(
                         f"[{i}/{total}] {t}"
                     ))
                     self.after(0, lambda p=i / total: self.progress_bar.set(p))
 
                     entry = {"id": vid, "title": vtitle, "data": None, "error": None}
-                    try:
-                        if lang != "auto":
-                            entry["data"] = ytt.fetch(vid, languages=[lang])
-                        else:
-                            # "auto" = any available transcript. The 1.x API's
-                            # fetch() default is languages=('en',), so we must
-                            # list first and pick any entry.
-                            tl = ytt.list(vid)
-                            picked = next(iter(tl), None)
-                            if picked is None:
-                                raise RuntimeError("no transcripts listed")
-                            entry["data"] = picked.fetch()
-                        self.after(0, lambda t=short: self._log_append(f"✔ [{t}]"))
-                    except Exception as ex:
-                        entry["error"] = (str(ex).splitlines()[0] or "no transcript")[:200]
-                        self.after(0, lambda t=short, e=entry["error"]: self._log_append(
-                            f"✖ [{t}] {e}"
-                        ))
+                    api_exhausted_with_rl = False
+
+                    if not yt_dlp_sticky:
+                        # ── Primary path: youtube-transcript-api with retries ──
+                        for attempt in range(TRANSCRIPT_MAX_RETRIES + 1):
+                            if self._cancel_flag.is_set():
+                                break
+                            try:
+                                if lang != "auto":
+                                    entry["data"] = ytt.fetch(vid, languages=[lang])
+                                else:
+                                    # "auto" = any available transcript. The 1.x API's
+                                    # fetch() default is languages=('en',), so we must
+                                    # list first and pick any entry.
+                                    tl = ytt.list(vid)
+                                    picked = next(iter(tl), None)
+                                    if picked is None:
+                                        raise RuntimeError("no transcripts listed")
+                                    entry["data"] = picked.fetch()
+                                entry["error"] = None
+                                self.after(0, lambda t=short: self._log_append(f"✔ [{t}]"))
+                                consecutive_rl_failures = 0
+                                break
+                            except Exception as ex:
+                                is_rl = _is_transcript_rate_limit_error(ex)
+                                if is_rl and attempt < TRANSCRIPT_MAX_RETRIES:
+                                    # Bump base delay so the rest of the run is gentler.
+                                    adaptive_delay = max(adaptive_delay, TRANSCRIPT_THROTTLE_FLOOR)
+                                    wait = min(
+                                        TRANSCRIPT_BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 3.0),
+                                        TRANSCRIPT_BACKOFF_CAP,
+                                    )
+                                    self.after(0, lambda t=short, w=wait, a=attempt + 1: self._log_append(
+                                        f"⏳ [{t}] rate-limited; waiting {w:.0f}s before retry {a}/{TRANSCRIPT_MAX_RETRIES}…"
+                                    ))
+                                    self.after(0, lambda i=i, t=short, w=wait: self._set_status(
+                                        f"[{i}/{total}] rate-limited, waiting {w:.0f}s…", color="orange"
+                                    ))
+                                    if _interruptible_sleep(wait):
+                                        self.after(0, lambda: self._set_status("Cancelled.", color="orange"))
+                                        return
+                                    continue
+
+                                entry["error"] = (str(ex).splitlines()[0] or "no transcript")[:200]
+                                if is_rl:
+                                    api_exhausted_with_rl = True
+                                else:
+                                    # Non-rate-limit failure (genuinely missing
+                                    # transcript, etc.) — proves the IP isn't
+                                    # hard-blocked, so reset the breaker and
+                                    # don't try yt-dlp (yt-dlp can't conjure
+                                    # captions that don't exist).
+                                    consecutive_rl_failures = 0
+                                    self.after(0, lambda t=short, e=entry["error"]: self._log_append(
+                                        f"✖ [{t}] {e}"
+                                    ))
+                                break
+
+                    # ── Fallback path: yt-dlp ──
+                    # Triggered when sticky mode is on (API previously proven
+                    # blocked this run) OR when the API just exhausted retries
+                    # with rate-limit errors for THIS video.
+                    if entry["data"] is None and (yt_dlp_sticky or api_exhausted_with_rl) and not self._cancel_flag.is_set():
+                        if api_exhausted_with_rl and not yt_dlp_sticky:
+                            self.after(0, lambda t=short: self._log_append(
+                                f"↪ [{t}] API blocked, trying yt-dlp fallback…"
+                            ))
+                            self.after(0, lambda i=i, t=short: self._set_status(
+                                f"[{i}/{total}] yt-dlp fallback…", color="orange"
+                            ))
+                        try:
+                            entry["data"] = _fetch_transcript_via_yt_dlp(vid, lang, cookie_browser)
+                            entry["error"] = None
+                            consecutive_rl_failures = 0
+                            if not yt_dlp_sticky:
+                                yt_dlp_sticky = True
+                                self.after(0, lambda t=short: self._log_append(
+                                    f"✔ [{t}] (via yt-dlp) — switching all "
+                                    "remaining videos to yt-dlp."
+                                ))
+                            else:
+                                self.after(0, lambda t=short: self._log_append(f"✔ [{t}] (yt-dlp)"))
+                        except Exception as ex:
+                            yt_err = (str(ex).splitlines()[0] or "yt-dlp failed")[:200]
+                            yt_is_rl = _is_transcript_rate_limit_error(ex)
+                            if api_exhausted_with_rl:
+                                # Both paths failed, both rate-limit-shaped =
+                                # network truly blocked at every endpoint.
+                                entry["error"] = f"API blocked + yt-dlp failed: {yt_err}"
+                                consecutive_rl_failures += 1
+                                self.after(0, lambda t=short, e=entry["error"]: self._log_append(
+                                    f"✖ [{t}] {e}"
+                                ))
+                            else:
+                                # Sticky mode (API already known blocked); only
+                                # yt-dlp failed. Treat rate-limit-shaped failures
+                                # as breaker fuel; treat real "no captions" as
+                                # a per-video miss and reset the counter.
+                                entry["error"] = f"yt-dlp failed: {yt_err}"
+                                if yt_is_rl:
+                                    consecutive_rl_failures += 1
+                                else:
+                                    consecutive_rl_failures = 0
+                                self.after(0, lambda t=short, e=entry["error"]: self._log_append(
+                                    f"✖ [{t}] {e}"
+                                ))
+
                     videos.append(entry)
+
+                    # Circuit breaker: bail out the moment we have proof the
+                    # network is blocked at every endpoint. Continuing would
+                    # burn ~2 min per video for nothing.
+                    if consecutive_rl_failures >= TRANSCRIPT_HARD_BLOCK_THRESHOLD:
+                        hard_blocked = True
+                        remaining = total - i
+                        # Differentiate: "Sign in to confirm" means YouTube
+                        # accepted the request but demanded auth — fixable
+                        # with cookies-from-browser. Pure 429s/IpBlocked mean
+                        # the IP itself is rejected — only an IP change helps.
+                        last_err = (entry.get("error") or "").lower()
+                        is_bot_check = (
+                            "sign in to confirm" in last_err
+                            or "not a bot" in last_err
+                            or "use --cookies" in last_err
+                        )
+                        self.after(0, lambda: self._log_append("━" * 60))
+                        if is_bot_check:
+                            # The player-client tweak (`web_embedded` etc.) usually
+                            # bypasses this without auth. Reaching here means even
+                            # those clients got bot-checked — escalation territory.
+                            self.after(0, lambda r=remaining: self._log_append(
+                                f"🛑 YouTube bot-check refused every player client. "
+                                f"Aborting with {r} video(s) unprocessed."
+                            ))
+                            self.after(0, lambda: self._log_append(
+                                "   Try: (1) switch your VPN exit node, "
+                                "(2) wait several hours for the IP reputation to "
+                                "decay, or (3) if you have a YouTube account, set "
+                                "'Cookies from:' to your logged-in browser."
+                            ))
+                        else:
+                            self.after(0, lambda r=remaining: self._log_append(
+                                f"🛑 Network appears hard-blocked by YouTube. "
+                                f"Aborting with {r} video(s) unprocessed."
+                            ))
+                            self.after(0, lambda: self._log_append(
+                                "   Next steps: switch your VPN exit node or "
+                                "wait several hours."
+                            ))
+                        break
 
                 # Write to disk
                 target = Path(output_dir)
@@ -1424,9 +1782,15 @@ class YtDlpGUI(ctk.CTk):
 
                 ok = sum(1 for v in videos if v["data"] is not None)
                 self.after(0, lambda: self.progress_bar.set(1.0))
-                self.after(0, lambda: self._set_status(
-                    f"✔ {ok}/{total} extracted  ·  wrote {written} file(s)", color="green"
-                ))
+                if hard_blocked:
+                    self.after(0, lambda: self._set_status(
+                        f"🛑 Aborted at {len(videos)}/{total} — see log "
+                        f"for fix. Wrote {written} file(s).", color="red"
+                    ))
+                else:
+                    self.after(0, lambda: self._set_status(
+                        f"✔ {ok}/{total} extracted  ·  wrote {written} file(s)", color="green"
+                    ))
             except Exception as e:
                 msg = str(e)
                 self.after(0, lambda: self._set_status(f"Transcript error: {msg}", color="red"))
