@@ -64,13 +64,18 @@ hygiene for a tool that shells out to `yt-dlp`. Error handling is mostly *narrow
 |---|---------|--------|--------|
 | 1 | God-class `YtDlpGUI` | Extract `downloader`/`transcript`/`config` modules; UI shell wires them | open — **needs a refactor plan**, not a quick edit |
 | 2 | Monolith helpers | Low-risk first step: lift module-level helpers into files | open |
-| 3 | `transcript` overlap | Decide consolidation strategy across the two tools | open — your call |
-| 4 | 2 cosmetic broad excepts | Narrow types | open — trivial, optional |
+| 3 | `transcript` overlap | **Resolved:** transcript was folded into ytdlp-gui (canonical home); standalone is dead and archived at `_archive/transcript/` | done 2026-05-28 |
+| 4 | 2 cosmetic broad excepts | Narrowed (urlparse→`ValueError` @263, icon→`tk.TclError` @392) | done 2026-05-28 |
 
 **Unlike pomo, there is no safe one-shot cleanup here.** The headline (#1) is a genuine
 refactor of a 1535-line class — high blast radius, must be planned and verified, not
 slopped in place. #4 is the only truly safe-now edit. Recommend: plan #1+#2 as a proper
 refactor (own spec/plan) when you choose to invest; do #4 anytime.
+
+**Status 2026-05-28:** #3 + #4 done. **#1 + #2 (the god-class refactor) remain** — the
+one open item for ytdlp-gui. It's a deliberate, plan-first, host-verified effort: extract
+`downloader` / `transcript` / `config` modules from the ~1535-LOC `YtDlpGUI` and leave a
+thin UI shell. Pick this up in a fresh session; this doc is the handoff.
 
 ---
 

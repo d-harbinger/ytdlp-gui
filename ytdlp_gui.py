@@ -260,7 +260,7 @@ YOUTUBE_ONLY = os.environ.get("YTDLP_GUI_YOUTUBE_ONLY", "0") == "1"
 def _validate_url(url: str) -> tuple[bool, str]:
     try:
         parsed = urllib.parse.urlparse(url)
-    except Exception:
+    except ValueError:
         return False, "Could not parse URL."
     if parsed.scheme not in ALLOWED_SCHEMES:
         return False, f"Blocked scheme '{parsed.scheme}://'. Only http/https allowed."
@@ -389,8 +389,8 @@ class YtDlpGUI(ctk.CTk):
         if os.path.exists(icon_path):
             try:
                 self.iconphoto(True, tk.PhotoImage(file=icon_path))
-            except Exception:
-                pass
+            except tk.TclError:
+                pass  # window icon is cosmetic; a bad image must not block startup
 
     def _on_close(self):
         self._cancel_flag.set()
