@@ -1,7 +1,7 @@
 # TEACHING.md — ytdlp-gui
 
 Per-project audit of AI-codegen slop, taught with **this repo's own code** as the
-examples, then triaged into a cleanup plan. Part of the `/mnt/Projects` library cleanup.
+examples, then triaged into a cleanup plan. Part of the `~/Projects` library cleanup.
 
 Each finding: **Tell** (what it looks like) · **Why** (why an AI does it) ·
 **Detect** (a signal you can run) · **Fix** (the surgical undo).
