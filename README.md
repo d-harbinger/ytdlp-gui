@@ -23,8 +23,8 @@ A modern desktop frontend for [yt-dlp](https://github.com/yt-dlp/yt-dlp), built 
 ```bash
 git clone <repo-url> ~/Projects/ytdlp-gui
 cd ~/Projects/ytdlp-gui
-chmod +x install-desktop.sh
-./install-desktop.sh
+chmod +x install.sh
+./install.sh
 ```
 
 The installer creates a virtual environment, installs dependencies, and adds a desktop entry to your application menu.

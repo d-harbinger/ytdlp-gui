@@ -1,5 +1,7 @@
 # Virtual environment
 venv/
+# per-host venvs created by install.sh on shared/multi-machine mounts
+venv-*/
 .venv/
 env/
 
