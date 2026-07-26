@@ -77,10 +77,16 @@ detect_pm() {
 }
 PM="$(detect_pm)"
 
-PRETTY_DISTRO="$(
-    . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-${NAME:-}}" \
-    || uname -s
-)"
+# Distro label, for the banner only — never for logic (that is detect_pm's job).
+# Written as an explicit if/else rather than `source && echo || uname`: in that
+# form the fallback also fires when sourcing SUCCEEDED but the echo failed, and
+# it silently yields an empty label when neither PRETTY_NAME nor NAME is set.
+PRETTY_DISTRO=""
+if [ -r /etc/os-release ]; then
+    # shellcheck source=/dev/null
+    PRETTY_DISTRO="$( . /etc/os-release; printf '%s' "${PRETTY_NAME:-${NAME:-}}" )"
+fi
+[ -n "$PRETTY_DISTRO" ] || PRETTY_DISTRO="$(uname -s)"
 
 # pkg_hint <component> — print the install command for this host.
 # Components: venv, pip, ffmpeg, tk, deno
@@ -266,6 +272,9 @@ install_deno() {
     install -m 755 "${tmp}/deno" "${HOME}/.local/bin/deno" || return 1
     info "deno installed: ${HOME}/.local/bin/deno"
 
+    # The tildes below are literal text the reader is meant to see (and, for the
+    # fish line, to type — fish expands it), not paths this script resolves.
+    # shellcheck disable=SC2088
     case ":$PATH:" in
         *":${HOME}/.local/bin:"*) ;;
         *) warn "~/.local/bin is not on PATH — add it so the app can find deno:"
