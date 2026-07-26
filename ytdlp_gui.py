@@ -38,6 +38,28 @@ import transcript
 import downloader
 
 
+# ── deno (external JS runtime) ────────────────────────────────────────────────
+# yt-dlp solves YouTube's player challenge with an external JS runtime, deno.
+# It is NOT a pip dependency — a venv cannot supply it — so neither
+# requirements.txt nor a reinstall will fix a missing one. Checked at run time
+# so the user gets a plain explanation instead of an opaque yt-dlp extractor
+# error, which is what surfaces otherwise.
+import urllib.parse
+
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def deno_missing_for(url):
+    """True when this URL needs deno for playback extraction and it isn't on PATH."""
+    if shutil.which("deno"):
+        return False
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == h or host.endswith("." + h) for h in _YOUTUBE_HOSTS)
+
+
 # UI scale is resolved in config.py (pure); applied here because it needs ctk,
 # and must run before any widgets are built.
 _dpi_scale = config.detect_scale()
@@ -944,6 +966,17 @@ class YtDlpGUI(ctk.CTk):
             self._active = self._extractor
             self._extractor.start(self._build_transcript_request(url, output_dir))
             return
+
+        # Placed after _log_clear() so the warning survives, and after the
+        # transcript branch, which needs no JS runtime.
+        if deno_missing_for(url):
+            self._log_append(
+                "⚠ deno not found — YouTube needs it to solve the player "
+                "challenge (yt-dlp EJS runtime).\n"
+                "  This download will likely fail with an extractor error.\n"
+                "  Install it, then restart:  bash install.sh --with-deno\n"
+                "  (or your package manager / https://deno.land — see README)"
+            )
 
         self._set_status("Starting download…")
         self._active = self._downloader
