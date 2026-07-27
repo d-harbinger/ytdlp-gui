@@ -134,8 +134,10 @@ class YtDlpGUI(ctk.CTk):
     def __init__(self):
         super().__init__(className="ytdlp-gui")
         self.title(APP_NAME)
-        self.minsize(WINDOW_MIN_W, WINDOW_MIN_H)
-        self.geometry(f"{WINDOW_MIN_W}x{WINDOW_MIN_H}")
+        self._align_font_dpi()
+        start_w, start_h = self._start_size()
+        self.minsize(start_w, start_h)
+        self.geometry(f"{start_w}x{start_h}")
 
         self._fetched_formats = []
         self._video_info = None
@@ -159,6 +161,36 @@ class YtDlpGUI(ctk.CTk):
                 self.iconphoto(True, tk.PhotoImage(file=icon_path))
             except tk.TclError:
                 pass  # window icon is cosmetic; a bad image must not block startup
+
+    # ── Display scaling ───────────────────────────────────────────────────────
+    # customtkinter sizes every font — and the glyphs it draws rounded widget
+    # corners with — in pixels. Tk converts those pixel sizes to points using
+    # its own scaling factor before the font renderer converts them back to
+    # pixels at the desktop's DPI, so a disagreement between the two blows up
+    # all text and every corner glyph inside correctly-sized widgets (see the
+    # long note in config.py). Telling Tk the DPI the renderer is actually using
+    # makes a pixel mean a pixel again. Must run before the first widget is
+    # built: fonts already created keep the size they were created with.
+    def _align_font_dpi(self):
+        dpi = config.read_xft_dpi()
+        if not dpi:
+            return
+        wanted = dpi / 72.0  # tk scaling is pixels per point
+        try:
+            if abs(float(self.tk.call("tk", "scaling")) - wanted) > 0.01:
+                self.tk.call("tk", "scaling", wanted)
+        except (tk.TclError, ValueError):
+            pass  # cosmetic; a display that refuses this must not block startup
+
+    # Start size, in the unscaled units the layout is written in — customtkinter
+    # multiplies both by the window scaling on the way out. On a scaled desktop
+    # that product can exceed the screen, so it is capped here; everything lives
+    # in a scrollable frame, so a shorter window only means more scrolling.
+    def _start_size(self):
+        scale = _dpi_scale if _dpi_scale > 0 else 1.0
+        avail_w = int(self.winfo_screenwidth() * 0.9 / scale)
+        avail_h = int(self.winfo_screenheight() * 0.9 / scale)
+        return min(WINDOW_MIN_W, avail_w), min(WINDOW_MIN_H, avail_h)
 
     def _on_close(self):
         if self._active:

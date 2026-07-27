@@ -94,6 +94,27 @@ it varies by machine and by where the venv landed:
 ~/.local/share/ytdlp-gui/venv-$(uname -n)/bin/python ~/Projects/ytdlp-gui/ytdlp_gui.py
 ```
 
+### Display scaling
+
+The **UI Scale** dropdown in the header sets the size of the interface and
+remembers the choice. On **Auto** it follows the display scaling the desktop
+publishes as `Xft.dpi` — a KDE or GNOME session at 200% gives a 2x interface —
+and falls back to 1x when the session publishes nothing.
+
+Auto also keeps text and widgets in step. Tk and the font renderer each convert
+between pixels and points using a different idea of the display's DPI, and a
+scaled desktop session is where the two diverge: text and the rounded widget
+corners come out several times too large while the widgets themselves stay at
+their true pixel size, so labels spill out of their buttons. The app reads the
+DPI the renderer is using and hands Tk the same number at startup.
+
+Two environment variables override the automatic behavior:
+
+| Variable | Effect |
+|---|---|
+| `YTDLP_GUI_SCALE` | Interface scale factor, e.g. `1.5`. Outranks the dropdown. |
+| `YTDLP_GUI_DPI` | Display DPI to assume, e.g. `192`. For sessions that publish none, or publish one that does not match what is on screen. |
+
 ## Credits
 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — video/audio download engine
