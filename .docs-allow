@@ -1,0 +1,9 @@
+# Root documents ruled as deliberate residents under the document placement
+# standard (claude-settings/workspace/proposals/2026-07-13-doc-placement-standard.md,
+# ratified 2026-07-27). One filename per line; '#' starts a comment.
+#
+# Machine-prose rulings. "this machine"/"this host" below is resolved by the
+# READER — a bind-option label, the host being deployed to, or a step on the
+# reader's own machine — so it is correct on every clone and is not the
+# writer-resolved deixis the check exists to catch.
+machine-prose: README.md
