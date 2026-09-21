@@ -164,26 +164,34 @@ class YtDlpGUI(ctk.CTk):
             except tk.TclError:
                 pass  # window icon is cosmetic; a bad image must not block startup
 
-    # ── yt-dlp version reporting ──────────────────────────────────────────────
-    # Both halves run on a worker thread and marshal back through self.after:
-    # a PyPI request and a pip invocation are each long enough to freeze the
-    # window if they ran on the Tk main loop. The check is throttled and
-    # switchable in updater.py — startup must not become a daily network call
-    # that nobody asked for.
+    # ── Engine version reporting (yt-dlp and deno) ────────────────────────────
+    # Everything runs on a worker thread and marshals back through self.after:
+    # a network request, a pip run and a deno upgrade are each long enough to
+    # freeze the window if they ran on the Tk main loop. The checks are
+    # throttled and switchable in updater.py — startup must not become a daily
+    # network call that nobody asked for. Both checks share one thread, in
+    # sequence, because each ends by rewriting the settings file.
     def _start_ytdlp_check(self):
         def _worker():
             status = updater.check()
-            self.after(0, lambda: self._apply_ytdlp_status(status))
+            self.after(0, lambda: self._apply_engine_status(
+                status, self._ytdlp_label, self._ytdlp_update_btn, 1))
+            deno = updater.check_deno()
+            self.after(0, lambda: self._apply_engine_status(
+                deno, self._deno_label, self._deno_update_btn, 3))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _apply_ytdlp_status(self, status):
-        self._ytdlp_label.configure(text=status.summary())
-        if status.behind:
-            self._ytdlp_label.configure(text_color="orange")
-            self._ytdlp_update_btn.grid(row=0, column=3, padx=(8, 0), sticky="w")
+    def _apply_engine_status(self, status, label, button, column):
+        label.configure(
+            text=status.summary(),
+            text_color="orange" if (status.behind or status.too_old) else "gray",
+        )
+        if status.behind and status.upgradable:
+            button.configure(state="normal", text="Update")
+            button.grid(row=0, column=column, padx=(8, 0), sticky="w")
         else:
-            self._ytdlp_update_btn.grid_remove()
+            button.grid_remove()
 
     def _run_ytdlp_upgrade(self):
         self._ytdlp_update_btn.configure(state="disabled", text="…")
@@ -202,6 +210,29 @@ class YtDlpGUI(ctk.CTk):
                     )
                 else:
                     self._ytdlp_update_btn.configure(state="normal", text="Update")
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _run_deno_upgrade(self):
+        self._deno_update_btn.configure(state="disabled", text="…")
+        self._set_status("Upgrading deno…")
+
+        def _worker():
+            ok, message = updater.upgrade_deno()
+            # deno is a separate process, so the new version is already the one
+            # a download will use: re-read it rather than ask for a restart.
+            status = updater.check_deno() if ok else None
+
+            def _done():
+                self._set_status(message, color="green" if ok else "red")
+                self._log_append(message)
+                if ok:
+                    self._apply_engine_status(
+                        status, self._deno_label, self._deno_update_btn, 3)
+                else:
+                    self._deno_update_btn.configure(state="normal", text="Update")
 
             self.after(0, _done)
 
@@ -295,17 +326,37 @@ class YtDlpGUI(ctk.CTk):
         # yt-dlp ships releases every few weeks and breaks against sites when it
         # falls behind, so "which yt-dlp is this" is a question the person will
         # have, and the answer was previously nowhere in the interface.
+        # They get a row of their own under the title: beside it, two "is
+        # available" messages and two buttons ran under the scale control and
+        # pushed the second button out of the window at the default width.
+        engine_f = ctk.CTkFrame(title_f, fg_color="transparent")
+        # Spans a third, empty column that takes the slack, so the wider row
+        # below does not stretch the title and its version apart.
+        engine_f.grid(row=1, column=0, columnspan=3, sticky="w")
+        title_f.grid_columnconfigure(2, weight=1)
         self._ytdlp_label = ctk.CTkLabel(
-            title_f, text=f"yt-dlp {updater.installed_version() or '—'}",
+            engine_f, text=f"yt-dlp {updater.installed_version() or '—'}",
             text_color="gray", font=ctk.CTkFont(size=11)
         )
-        self._ytdlp_label.grid(row=0, column=2, padx=(12, 0), sticky="w")
+        self._ytdlp_label.grid(row=0, column=0, sticky="w")
         self._ytdlp_update_btn = ctk.CTkButton(
-            title_f, text="Update", width=64, height=22,
+            engine_f, text="Update", width=64, height=22,
             font=ctk.CTkFont(size=11), command=self._run_ytdlp_upgrade
         )
         # Placed only once a check has found a newer release; an always-visible
         # button would invite an upgrade nobody established was needed.
+
+        # deno is the other engine: yt-dlp runs YouTube's player challenge in
+        # it. Filled in by the worker, since asking deno for its version starts
+        # a process and this is the Tk main loop.
+        self._deno_label = ctk.CTkLabel(
+            engine_f, text="deno …", text_color="gray", font=ctk.CTkFont(size=11)
+        )
+        self._deno_label.grid(row=0, column=2, padx=(16, 0), sticky="w")
+        self._deno_update_btn = ctk.CTkButton(
+            engine_f, text="Update", width=64, height=22,
+            font=ctk.CTkFont(size=11), command=self._run_deno_upgrade
+        )
 
         # ── UI Scale control (persists to config) ──
         scale_f = ctk.CTkFrame(hdr_f, fg_color="transparent")

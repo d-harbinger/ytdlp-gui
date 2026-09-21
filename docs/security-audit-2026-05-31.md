@@ -61,3 +61,33 @@ float forward, so freshness depends on the install. Not run in this pass
 No vulnerabilities found. Command-injection, SSRF/scheme, path-traversal, and
 post-download-exec surfaces are all closed by design (API invocation,
 input validation, fixed templates, list-arg subprocess). No changes made.
+
+## Addendum, 2026-09-21 — the update path
+
+`updater.py` introduced the application's first subprocess sinks and its first
+network requests to hosts the application chooses. Reviewed against the same
+threat model:
+
+- **Two subprocess calls, both list-argument, neither through a shell.**
+  `[sys.executable, "-m", "pip", "install", …]` with a fixed tuple of
+  requirement names, and `[<deno>, "upgrade"]`. No value from a URL, from media
+  metadata or from the settings file reaches either argument list. The deno
+  path comes from a `PATH` lookup — the same lookup yt-dlp performs for every
+  YouTube download, so it grants nothing the download path had not already.
+- **The upgrades are fenced by ownership.** pip runs only inside a virtual
+  environment; `deno upgrade` runs only when this account can write both the
+  binary and its directory. Neither can touch a system interpreter or a
+  distribution-packaged deno, and neither ever runs unprompted.
+- **Two fixed HTTPS requests,** to `pypi.org` and `dl.deno.land`, with default
+  certificate verification, an eight-second timeout and a bounded read on the
+  deno pointer. The responses are compared as version numbers and displayed;
+  nothing from them is executed or used to build a path or a command. A hostile
+  response could at worst show a false "update available", and pressing the
+  button would then install whatever the real index serves.
+- **Not covered:** artifact authenticity. pip and `deno upgrade` trust their
+  origin over TLS; nothing is hash-pinned.
+
+The recommendation above was carried out the same day: `pip-audit` against the
+resolved environment, after an upgrade through the button's own code path,
+reported no known vulnerabilities, and yt-dlp's thirteen published advisories
+all carry fix versions at or below 2026.7.4, under the declared floor.

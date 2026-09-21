@@ -72,7 +72,7 @@ machines breaks on whichever machine didn't create it.
 
 Override with `YTDLP_GUI_VENV=/path/to/venv bash install.sh`.
 
-## Keeping yt-dlp current
+## Keeping yt-dlp and deno current
 
 The download engine is yt-dlp, which releases every few weeks. Sites change
 how they serve media, extractors break in response, and security fixes arrive
@@ -107,10 +107,24 @@ are years old; that is where HTTP-stack advisories accumulate. The window
 toolkit is deliberately not touched by the button. Re-running `bash install.sh`
 refreshes everything, the toolkit included.
 
-Two things sit outside this mechanism. ffmpeg and Tk belong to the system
-package manager. A deno installed with `--with-deno` lives in `~/.local/bin`
-and is updated with `deno upgrade`; one installed from a distribution package
-follows that package.
+deno gets the same treatment, because it is the other engine: yt-dlp runs
+YouTube's player challenge — code the site supplies — inside it, sandboxed, on
+every YouTube download, and documents 2.3.0 as the oldest release it supports.
+The header shows the installed deno version, and says so when it is below that
+floor. What happens beyond that depends on who owns the binary:
+
+- A deno installed with `--with-deno` lives in `~/.local/bin`, where nothing
+  else updates it. The application asks the vendor's release pointer
+  (`dl.deno.land`) for the newest version under the same daily throttle and the
+  same `check_updates` switch, and offers an **Update** button that runs
+  `deno upgrade`. deno is started afresh for each download, so the new version
+  is in effect at once, with no restart.
+- A deno from a distribution package is shown as `(system package)` and never
+  compared against upstream. The package manager keeps it current, the
+  application could not replace it, and a permanent warning about an upgrade it
+  cannot perform would only teach the eye to ignore that line.
+
+ffmpeg and Tk belong to the system package manager and sit outside all of this.
 
 ## Uninstall
 

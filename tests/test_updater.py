@@ -230,5 +230,119 @@ def a_check_does_not_overwrite_settings_saved_while_it_ran():
     assert config.read_config().get("ui_scale") == "1.5"
 
 
+# ── deno ──────────────────────────────────────────────────────────────────────
+
+
+class _Deno:
+    """Stand in for a deno on this machine: where it is, whose it is, its version."""
+
+    def __init__(self, path="~/.local/bin/deno", version="2.9.1",
+                 self_managed=True, latest="2.9.7"):
+        self.calls = 0
+        self._saved = (
+            updater.deno_path, updater.deno_version,
+            updater.deno_is_self_managed, updater.deno_latest,
+        )
+        updater.deno_path = lambda: path
+        updater.deno_version = lambda p=None: version if path else ""
+        updater.deno_is_self_managed = lambda p=None: self_managed
+
+        def _latest(timeout=0):
+            self.calls += 1
+            return latest
+
+        updater.deno_latest = _latest
+
+    def restore(self):
+        (updater.deno_path, updater.deno_version,
+         updater.deno_is_self_managed, updater.deno_latest) = self._saved
+
+
+@case
+def deno_version_line_is_parsed():
+    line = "deno 2.9.7 (stable, release, x86_64-unknown-linux-gnu)\nv8 14.0\n"
+    assert updater.parse_deno_version(line) == "2.9.7"
+    assert updater.parse_deno_version("") == ""
+    assert updater.parse_deno_version("something else entirely") == ""
+
+
+@case
+def a_self_managed_deno_is_checked_and_can_be_behind():
+    _isolate_config()
+    fake = _Deno()
+    try:
+        status = updater.check_deno(force=True)
+    finally:
+        fake.restore()
+    assert status.name == "deno"
+    assert status.behind is True
+    assert status.upgradable is True
+    assert config.read_config()[updater.KEY_DENO_LAST_SEEN] == "2.9.7"
+
+
+@case
+def a_system_packaged_deno_is_shown_but_never_asked_about():
+    # The distribution owns that binary. Comparing it against upstream would
+    # turn the label orange for ever, over an upgrade this program cannot do.
+    _isolate_config()
+    fake = _Deno(path="/usr/bin/deno", self_managed=False)
+    try:
+        status = updater.check_deno(force=True)
+    finally:
+        fake.restore()
+    assert fake.calls == 0
+    assert status.upgradable is False
+    assert status.behind is False
+    assert "system package" in status.summary()
+
+
+@case
+def a_missing_deno_reaches_no_network():
+    _isolate_config()
+    fake = _Deno(path="")
+    try:
+        status = updater.check_deno(force=True)
+    finally:
+        fake.restore()
+    assert fake.calls == 0
+    assert "not installed" in status.summary()
+
+
+@case
+def a_deno_below_the_yt_dlp_minimum_says_so():
+    _isolate_config()
+    fake = _Deno(path="/usr/bin/deno", version="2.1.4", self_managed=False)
+    try:
+        status = updater.check_deno()
+    finally:
+        fake.restore()
+    assert status.too_old is True
+    assert updater.DENO_MINIMUM in status.summary()
+
+
+@case
+def the_deno_throttle_is_separate_from_the_yt_dlp_one():
+    _isolate_config()
+    config.write_config({updater.KEY_LAST_CHECK: str(int(updater.time.time()))})
+    fake = _Deno()
+    try:
+        updater.check_deno()
+        updater.check_deno()
+    finally:
+        fake.restore()
+    assert fake.calls == 1  # due once despite a fresh yt-dlp check; then throttled
+
+
+@case
+def deno_upgrade_refuses_a_binary_it_does_not_own():
+    fake = _Deno(path="/usr/bin/deno", self_managed=False)
+    try:
+        ok, message = updater.upgrade_deno()
+    finally:
+        fake.restore()
+    assert ok is False
+    assert "package manager" in message
+
+
 if __name__ == "__main__":
     run()

@@ -12,3 +12,15 @@
 # to on install day is how five CVEs were reported against this repository on
 # 2026-09-21.
 pypi.org
+
+# The deno check in updater.py reads the vendor's release pointer, one line of
+# text, under the same daily throttle and the same check_updates switch. It is
+# made only for a deno this account owns (the one `install.sh --with-deno`
+# puts in ~/.local/bin); a distribution-packaged deno is shown and never asked
+# about, so on those machines this host is never contacted.
+dl.deno.land
+
+# Release archives and their published SHA-256 files: `install.sh --with-deno`
+# downloads and verifies from here, and `deno upgrade` — run only from the
+# Update button — fetches from here as well.
+github.com
