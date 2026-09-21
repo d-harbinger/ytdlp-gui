@@ -19,6 +19,7 @@ from datetime import timedelta
 import customtkinter as ctk
 
 import config
+import updater
 import validation
 
 try:
@@ -152,6 +153,7 @@ class YtDlpGUI(ctk.CTk):
         self._extractor = transcript.TranscriptExtractor(**_cb)
 
         self._build_ui()
+        self._start_ytdlp_check()
         self._bind_x11_scroll()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -161,6 +163,49 @@ class YtDlpGUI(ctk.CTk):
                 self.iconphoto(True, tk.PhotoImage(file=icon_path))
             except tk.TclError:
                 pass  # window icon is cosmetic; a bad image must not block startup
+
+    # ── yt-dlp version reporting ──────────────────────────────────────────────
+    # Both halves run on a worker thread and marshal back through self.after:
+    # a PyPI request and a pip invocation are each long enough to freeze the
+    # window if they ran on the Tk main loop. The check is throttled and
+    # switchable in updater.py — startup must not become a daily network call
+    # that nobody asked for.
+    def _start_ytdlp_check(self):
+        def _worker():
+            status = updater.check()
+            self.after(0, lambda: self._apply_ytdlp_status(status))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_ytdlp_status(self, status):
+        self._ytdlp_label.configure(text=status.summary())
+        if status.behind:
+            self._ytdlp_label.configure(text_color="orange")
+            self._ytdlp_update_btn.grid(row=0, column=3, padx=(8, 0), sticky="w")
+        else:
+            self._ytdlp_update_btn.grid_remove()
+
+    def _run_ytdlp_upgrade(self):
+        self._ytdlp_update_btn.configure(state="disabled", text="…")
+        self._set_status("Upgrading yt-dlp…")
+
+        def _worker():
+            ok, message = updater.upgrade()
+
+            def _done():
+                self._set_status(message, color="green" if ok else "red")
+                self._log_append(message)
+                if ok:
+                    self._ytdlp_update_btn.grid_remove()
+                    self._ytdlp_label.configure(
+                        text="yt-dlp updated — restart to use it", text_color="green"
+                    )
+                else:
+                    self._ytdlp_update_btn.configure(state="normal", text="Update")
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── Display scaling ───────────────────────────────────────────────────────
     # customtkinter sizes every font — and the glyphs it draws rounded widget
@@ -246,6 +291,21 @@ class YtDlpGUI(ctk.CTk):
         ctk.CTkLabel(title_f, text=f"v{APP_VERSION}", text_color="gray").grid(
             row=0, column=1, padx=(8, 0), sticky="w"
         )
+        # The engine's version belongs on screen next to the application's own.
+        # yt-dlp ships releases every few weeks and breaks against sites when it
+        # falls behind, so "which yt-dlp is this" is a question the person will
+        # have, and the answer was previously nowhere in the interface.
+        self._ytdlp_label = ctk.CTkLabel(
+            title_f, text=f"yt-dlp {updater.installed_version() or '—'}",
+            text_color="gray", font=ctk.CTkFont(size=11)
+        )
+        self._ytdlp_label.grid(row=0, column=2, padx=(12, 0), sticky="w")
+        self._ytdlp_update_btn = ctk.CTkButton(
+            title_f, text="Update", width=64, height=22,
+            font=ctk.CTkFont(size=11), command=self._run_ytdlp_upgrade
+        )
+        # Placed only once a check has found a newer release; an always-visible
+        # button would invite an upgrade nobody established was needed.
 
         # ── UI Scale control (persists to config) ──
         scale_f = ctk.CTkFrame(hdr_f, fg_color="transparent")

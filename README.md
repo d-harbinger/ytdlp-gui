@@ -72,6 +72,32 @@ machines breaks on whichever machine didn't create it.
 
 Override with `YTDLP_GUI_VENV=/path/to/venv bash install.sh`.
 
+## Keeping yt-dlp current
+
+The download engine is yt-dlp, which releases every few weeks. Sites change
+how they serve media, extractors break in response, and security fixes arrive
+in the same stream rather than on a separate branch — an install that resolved
+the dependency once and never looked again stops working correctly some weeks
+later, without saying so.
+
+The header therefore shows the installed engine version beside the application
+version. Once a day at most, the application asks PyPI whether a newer release
+exists; when there is one, the version turns orange and an **Update** button
+appears next to it. Nothing is installed until that button is pressed, and the
+result — including a failure — is written to the status line and the log. The
+new version takes effect at the next launch, because the old one is already
+loaded into the running process.
+
+To switch the daily question off, add this to `~/.config/ytdlp-gui/settings.conf`:
+
+```
+check_updates=0
+```
+
+The version is still displayed; only the network check stops. The upgrade runs
+`pip install --upgrade` inside the application's own virtual environment and
+refuses to run anywhere else, so it cannot disturb a system Python.
+
 ## Uninstall
 
 ```bash
