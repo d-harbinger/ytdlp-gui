@@ -139,6 +139,24 @@ def a_successful_check_records_what_it_saw():
     assert config.read_config()[updater.KEY_LAST_SEEN] == "2026.08.19"
 
 
+@case
+def a_forced_check_runs_even_with_the_daily_check_switched_off():
+    # check_updates=0 stops the application asking on its own. Pressing Check
+    # is the person asking, which is the consent the switch exists to protect.
+    _isolate_config()
+    config.write_config({updater.KEY_ENABLED: "0"})
+    original = updater.latest_version
+    updater.latest_version = lambda timeout=0: "2026.08.19"
+    try:
+        unforced = updater.check()
+        forced = updater.check(force=True)
+    finally:
+        updater.latest_version = original
+    assert unforced.checked is False
+    assert forced.checked is True
+    assert config.read_config()[updater.KEY_ENABLED] == "0"
+
+
 # ── Upgrade guard ─────────────────────────────────────────────────────────────
 
 

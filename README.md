@@ -88,13 +88,19 @@ result — including a failure — is written to the status line and the log. Th
 new version takes effect at the next launch, because the old one is already
 loaded into the running process.
 
+To ask at any time, press **Check for updates** at the end of that row. It
+asks immediately, ignoring the once-a-day limit, and writes the answer for both
+engines to the status line and the log — including "current", so a check that
+finds nothing still visibly happened.
+
 To switch the daily question off, add this to `~/.config/ytdlp-gui/settings.conf`:
 
 ```
 check_updates=0
 ```
 
-The version is still displayed; only the network check stops. The upgrade runs
+The version is still displayed; only the unprompted check stops. **Check for
+updates** still works, since pressing it is the person asking. The upgrade runs
 `pip install --upgrade` inside the application's own virtual environment and
 refuses to run anywhere else, so it cannot disturb a system Python.
 

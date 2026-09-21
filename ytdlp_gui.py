@@ -193,6 +193,37 @@ class YtDlpGUI(ctk.CTk):
         else:
             button.grid_remove()
 
+    def _run_engine_check(self):
+        # Forced: a click is the person asking, so it bypasses both the daily
+        # throttle and the check_updates=0 switch, which only governs what the
+        # application does unprompted.
+        self._engine_check_btn.configure(state="disabled", text="Checking…")
+        self._set_status("Checking for updates…")
+
+        def _worker():
+            status = updater.check(force=True)
+            deno = updater.check_deno(force=True)
+
+            def _done():
+                self._apply_engine_status(
+                    status, self._ytdlp_label, self._ytdlp_update_btn, 1)
+                self._apply_engine_status(
+                    deno, self._deno_label, self._deno_update_btn, 3)
+                self._engine_check_btn.configure(state="normal", text="Check for updates")
+                message = f"{status.summary()} · {deno.summary()}"
+                if status.error or deno.error:
+                    color = "red"
+                elif status.behind or deno.behind or deno.too_old:
+                    color = "orange"
+                else:
+                    color = "green"
+                self._set_status(message, color=color)
+                self._log_append(f"Update check: {message}")
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _run_ytdlp_upgrade(self):
         self._ytdlp_update_btn.configure(state="disabled", text="…")
         self._set_status("Upgrading yt-dlp…")
@@ -326,14 +357,13 @@ class YtDlpGUI(ctk.CTk):
         # yt-dlp ships releases every few weeks and breaks against sites when it
         # falls behind, so "which yt-dlp is this" is a question the person will
         # have, and the answer was previously nowhere in the interface.
-        # They get a row of their own under the title: beside it, two "is
-        # available" messages and two buttons ran under the scale control and
-        # pushed the second button out of the window at the default width.
-        engine_f = ctk.CTkFrame(title_f, fg_color="transparent")
-        # Spans a third, empty column that takes the slack, so the wider row
-        # below does not stretch the title and its version apart.
-        engine_f.grid(row=1, column=0, columnspan=3, sticky="w")
-        title_f.grid_columnconfigure(2, weight=1)
+        # They get a row of their own across the whole header. Beside the title,
+        # or even under it but left of the scale control, the fullest state —
+        # two "is available" messages, two Update buttons and the check button
+        # — ran under that control and lost its last button at the default
+        # width. Tk still reported the button as mapped; only a capture showed it.
+        engine_f = ctk.CTkFrame(hdr_f, fg_color="transparent")
+        engine_f.grid(row=1, column=0, columnspan=2, sticky="w")
         self._ytdlp_label = ctk.CTkLabel(
             engine_f, text=f"yt-dlp {updater.installed_version() or '—'}",
             text_color="gray", font=ctk.CTkFont(size=11)
@@ -357,6 +387,18 @@ class YtDlpGUI(ctk.CTk):
             engine_f, text="Update", width=64, height=22,
             font=ctk.CTkFont(size=11), command=self._run_deno_upgrade
         )
+
+        # The automatic check is silent and at most daily, so without this a
+        # person has no way to ask "am I current?" and see an answer. Always
+        # visible, last in the row, and gray so it does not compete with an
+        # Update button when one is showing.
+        self._engine_check_btn = ctk.CTkButton(
+            engine_f, text="Check for updates", width=110, height=22,
+            font=ctk.CTkFont(size=11), fg_color="transparent", border_width=1,
+            text_color=("gray30", "gray70"), hover_color=("gray85", "gray25"),
+            command=self._run_engine_check
+        )
+        self._engine_check_btn.grid(row=0, column=4, padx=(16, 0), sticky="w")
 
         # ── UI Scale control (persists to config) ──
         scale_f = ctk.CTkFrame(hdr_f, fg_color="transparent")
