@@ -485,6 +485,52 @@ EOF
     info "Desktop entry created: ${DESKTOP_FILE}"
 fi
 
+# ── Other virtual environments ──
+# A venv this run did not choose is a copy of yt-dlp nothing will ever upgrade.
+# It stays importable, a scanner reading the disk scores it, and on 2026-09-21
+# one of them was found three months behind and open on three CVEs. So every
+# other venv is accounted for here, after the chosen one is installed and its
+# imports verified — never before, so a failed run cannot leave this machine
+# with none.
+#
+#   ours    — this machine's, superseded by the venv chosen above (the usual
+#             cause: the project moved onto or off a shared mount, which moves
+#             where the venv lives). Removed: it is this script's own build
+#             output, and the launcher and desktop entry no longer point at it.
+#   foreign — another machine's, in a shared project folder. Never touched; it
+#             is reported with its yt-dlp version so that a stale one is visible
+#             from whichever machine runs the installer next.
+venv_ytdlp_version() {
+    # Read from the file rather than by running the venv's python: a foreign
+    # venv's interpreter may not run here at all.
+    local f
+    f="$(find "$1/lib" -maxdepth 4 -path '*site-packages/yt_dlp/version.py' 2>/dev/null | head -1)"
+    [ -n "$f" ] && sed -n "s/^__version__ = '\\(.*\\)'/\\1/p" "$f" | head -1
+}
+
+for other in "${SCRIPT_DIR}/venv" "${SCRIPT_DIR}"/venv-* "${XDG_DATA}/${APP_ID}"/venv-*; do
+    [ -d "$other" ] || continue
+    [ "$other" -ef "$VENV_DIR" ] && continue
+    other_version="$(venv_ytdlp_version "$other")"
+    case "$other" in
+        "${SCRIPT_DIR}/venv-${HOST_TAG}"|"${XDG_DATA}/${APP_ID}/venv-${HOST_TAG}") ours=1 ;;
+        "${SCRIPT_DIR}/venv") if venv_works "$other"; then ours=1; else ours=0; fi ;;
+        *) ours=0 ;;
+    esac
+    # An explicit YTDLP_GUI_VENV means the person is managing placement; report
+    # what else exists, and leave removing it to them.
+    [ -n "${YTDLP_GUI_VENV:-}" ] && ours=0
+    if [ "$ours" -eq 1 ]; then
+        warn "Superseded venv from this machine (yt-dlp ${other_version:-not installed}) — removing:"
+        warn "  ${other}"
+        rm -rf "$other"
+    else
+        warn "Another machine's venv (yt-dlp ${other_version:-not installed}) — not updated by this run:"
+        warn "  ${other}"
+        warn "  Run 'bash install.sh' on that machine, or remove it there with uninstall.sh."
+    fi
+done
+
 # ── Done ──
 echo ""
 echo "═══════════════════════════════════════════"

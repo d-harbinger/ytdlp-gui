@@ -72,6 +72,16 @@ machines breaks on whichever machine didn't create it.
 
 Override with `YTDLP_GUI_VENV=/path/to/venv bash install.sh`.
 
+Every run ends by accounting for the venvs it did **not** choose, because a
+venv nothing points at is a copy of yt-dlp nothing will ever upgrade — still on
+disk, still importable, and still what a vulnerability scanner reads. A
+superseded venv from the same machine (the usual cause is the project moving
+onto or off a shared mount) is removed once the new one has installed and
+verified. Another machine's venv in a shared folder is never touched; it is
+listed with its yt-dlp version, so a stale one is visible from whichever
+machine runs the installer next. With `YTDLP_GUI_VENV` set, nothing is removed
+and everything else is only listed.
+
 ## Keeping yt-dlp and deno current
 
 The download engine is yt-dlp, which releases every few weeks. Sites change
