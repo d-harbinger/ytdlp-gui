@@ -154,5 +154,81 @@ def upgrade_refuses_outside_a_virtualenv():
     assert "virtual environment" in message
 
 
+def _captured_upgrade_command():
+    """Run upgrade() with pip replaced, and return the command it built."""
+    seen = {}
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return _Done()
+
+    original_venv, original_run = updater.in_virtualenv, updater.subprocess.run
+    updater.in_virtualenv = lambda: True
+    updater.subprocess.run = _fake_run
+    try:
+        ok, _ = updater.upgrade()
+    finally:
+        updater.in_virtualenv = original_venv
+        updater.subprocess.run = original_run
+    assert ok is True
+    return seen["cmd"]
+
+
+@case
+def upgrade_moves_transitive_dependencies_too():
+    # pip's default strategy leaves requests, urllib3 and certifi wherever
+    # install day put them, as long as they still satisfy yt-dlp's floors.
+    cmd = _captured_upgrade_command()
+    assert "--upgrade" in cmd
+    assert cmd[cmd.index("--upgrade-strategy") + 1] == "eager"
+
+
+@case
+def upgrade_covers_every_scraping_dependency():
+    cmd = _captured_upgrade_command()
+    assert "yt-dlp[default]" in cmd
+    assert "youtube-transcript-api" in cmd
+
+
+@case
+def an_unexpected_check_failure_is_still_reported_not_raised():
+    # http.client.IncompleteRead is neither URLError nor OSError; raised on a
+    # worker thread it would end the check silently.
+    _isolate_config()
+    original = updater.latest_version
+
+    def _boom(timeout=0):
+        raise TypeError("info was not a mapping")
+
+    updater.latest_version = _boom
+    try:
+        status = updater.check(force=True)
+    finally:
+        updater.latest_version = original
+    assert status.error == "TypeError"
+
+
+@case
+def a_check_does_not_overwrite_settings_saved_while_it_ran():
+    _isolate_config()
+    original = updater.latest_version
+
+    def _slow(timeout=0):
+        config.save_config_key("ui_scale", "1.5")  # the person, mid-request
+        return "2026.08.19"
+
+    updater.latest_version = _slow
+    try:
+        updater.check(force=True)
+    finally:
+        updater.latest_version = original
+    assert config.read_config().get("ui_scale") == "1.5"
+
+
 if __name__ == "__main__":
     run()

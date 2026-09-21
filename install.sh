@@ -400,11 +400,17 @@ info "venv activated: $(command -v python)"
 info "Upgrading pip…"
 pip install --upgrade pip --quiet
 
+# --upgrade with the eager strategy, so that re-running the installer is a
+# full refresh. Without it a re-run is a no-op for anything that still meets
+# its floor, and pip's default strategy never moves a transitive dependency
+# (requests, urllib3, certifi) that the new yt-dlp still accepts.
 info "Installing requirements…"
 if [ -f "${SCRIPT_DIR}/requirements.txt" ]; then
-    pip install -r "${SCRIPT_DIR}/requirements.txt" --quiet
+    pip install --upgrade --upgrade-strategy eager \
+        -r "${SCRIPT_DIR}/requirements.txt" --quiet
 else
-    pip install customtkinter yt-dlp --quiet
+    pip install --upgrade --upgrade-strategy eager \
+        customtkinter "yt-dlp[default]" youtube-transcript-api --quiet
 fi
 
 info "Dependencies installed."

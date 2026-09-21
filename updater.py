@@ -28,14 +28,18 @@ import os
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
 import config
 
 PACKAGE = "yt-dlp"
-REQUIREMENT = "yt-dlp[default]"
+
+# What the Update button upgrades. youtube-transcript-api scrapes the same site
+# yt-dlp does and decays the same way, so it moves with it. customtkinter is
+# left out on purpose: it has no network surface, and a toolkit upgrade that
+# broke the window would take the Update button down with it.
+REQUIREMENTS = ("yt-dlp[default]", "youtube-transcript-api")
 PYPI_URL = f"https://pypi.org/pypi/{PACKAGE}/json"
 
 # How long a check is trusted before the network is consulted again. A release
@@ -156,16 +160,21 @@ def check(force: bool = False, timeout: int = NETWORK_TIMEOUT) -> UpdateStatus:
     try:
         status.latest = latest_version(timeout=timeout)
         status.checked = True
+        # Re-read before writing: the request above can take seconds on a
+        # worker thread, and writing back the snapshot taken before it would
+        # discard any setting the person saved in the meantime.
         config.write_config(
             {
-                **conf,
+                **config.read_config(),
                 KEY_LAST_CHECK: str(int(time.time())),
                 KEY_LAST_SEEN: status.latest,
             }
         )
-    except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+    except Exception as e:
         # A failed check is reported, never raised: no download should be
-        # blocked because PyPI was unreachable.
+        # blocked because PyPI was unreachable. Deliberately broad — this runs
+        # on a worker thread, where an uncaught http.client or TypeError would
+        # end the check without a word on screen.
         status.error = type(e).__name__
         status.latest = conf.get(KEY_LAST_SEEN, "")
     return status
@@ -191,7 +200,15 @@ def upgrade(timeout: int = 300) -> tuple:
             f"Install with install.sh, or upgrade {PACKAGE} with the package "
             "manager that provided it.",
         )
-    cmd = [sys.executable, "-m", "pip", "install", "--upgrade", REQUIREMENT]
+    # Eager, because pip's default strategy upgrades a transitive dependency
+    # only when the new yt-dlp refuses the installed one — and yt-dlp's floors
+    # are years old. Without it requests, urllib3 and certifi stay wherever
+    # install day put them: the HTTP stack and the CA bundle, which is where
+    # the advisories this module exists to clear actually land.
+    cmd = [
+        sys.executable, "-m", "pip", "install",
+        "--upgrade", "--upgrade-strategy", "eager", *REQUIREMENTS,
+    ]
     try:
         r = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,

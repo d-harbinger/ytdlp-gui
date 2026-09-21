@@ -98,6 +98,20 @@ The version is still displayed; only the network check stops. The upgrade runs
 `pip install --upgrade` inside the application's own virtual environment and
 refuses to run anywhere else, so it cannot disturb a system Python.
 
+The button upgrades more than yt-dlp itself. It also moves
+`youtube-transcript-api`, which scrapes the same site and decays the same way,
+and it uses pip's eager strategy so the libraries underneath both — `requests`,
+`urllib3`, the `certifi` CA bundle — move too. pip's default leaves those at
+whatever install day resolved for as long as they meet yt-dlp's floors, which
+are years old; that is where HTTP-stack advisories accumulate. The window
+toolkit is deliberately not touched by the button. Re-running `bash install.sh`
+refreshes everything, the toolkit included.
+
+Two things sit outside this mechanism. ffmpeg and Tk belong to the system
+package manager. A deno installed with `--with-deno` lives in `~/.local/bin`
+and is updated with `deno upgrade`; one installed from a distribution package
+follows that package.
+
 ## Uninstall
 
 ```bash
