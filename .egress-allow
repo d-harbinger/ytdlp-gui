@@ -1,0 +1,14 @@
+# .egress-allow — third-party network hosts this repo is ALLOWED to contact,
+# one per line. See .egress-allow.example for the full rules and the enforce
+# switch. This repository is report-only until the list below is complete: the
+# application's whole purpose is contacting arbitrary media sites named by the
+# person using it, so the hosts worth declaring here are the ones IT chooses,
+# not the ones a download reaches.
+
+# The update check in updater.py reads the current yt-dlp release number from
+# the package index the dependency is installed from. Request only, no payload,
+# at most once a day, and switchable off with check_updates=0 in the settings
+# file. Declared because an engine left at the version it happened to resolve
+# to on install day is how five CVEs were reported against this repository on
+# 2026-09-21.
+pypi.org
